@@ -1,8 +1,8 @@
-import HeaderAuth from "@/components/header-auth";
 import {GeistSans} from "geist/font/sans";
 import {ThemeProvider} from "next-themes";
 import "./globals.css";
-import Image from "next/image";
+import NavBar from "@/components/NavBar";
+
 
 const defaultUrl = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
@@ -14,26 +14,7 @@ export const metadata = {
     description: "Veracity Knowledge Management System",
 };
 
-function Header() {
-    return (
-        <nav className="flex items-center justify-between px-20 py-4">
-            {/* Left side: Logo */}
-            <div>
-                <Image
-                    src="/rb_1741.png" // Replace with your logo's path
-                    alt="Company Logo"
-                    width={70} // Set the width of the logo
-                    height={70} // Set the height of the logo
-                />
-            </div>
 
-            {/* Right side: Auth component */}
-            <div className="ml-auto">
-                <HeaderAuth/>
-            </div>
-        </nav>
-    )
-}
 
 export default function RootLayout({children,}: { children: React.ReactNode; }) {
     return (
@@ -47,7 +28,7 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
         >
             <main className="">
                 <div className="">
-                    <Header/>
+                    <NavBar/>
                     <div
                         // className="flex flex-col gap-20 max-w-7xl p-5"
                     >
