@@ -10,6 +10,9 @@ export async function GET(request: Request) {
     const origin = requestUrl.origin;
     const redirectTo = requestUrl.searchParams.get("redirect_to")?.toString();
 
+    console.log(code)
+    console.log(redirectTo)
+
     if (code) {
         const supabase = createClient();
         await supabase.auth.exchangeCodeForSession(code);

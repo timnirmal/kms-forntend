@@ -17,11 +17,12 @@ import {
     FiPieChart
 } from 'react-icons/fi';
 import {useState} from "react";
+import ThemeToggle from "@/components/ThemeToggle";
 // import {createClient} from "@/utils/supabase/client";
 // import {redirect} from "next/navigation";
 
 
-export default async function RootLayout({children,}: { children: React.ReactNode; }) {
+export default function RootLayout({children,}: { children: React.ReactNode; }) {
     // const supabase = createClient();
     //
     // const {
@@ -59,15 +60,16 @@ export default async function RootLayout({children,}: { children: React.ReactNod
                                 <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>
                             </button>
                             <div className="flex items-center space-x-2">
-                                {/*<Image*/}
-                                {/*    src='/default-avatar.png'*/}
-                                {/*    alt="Profile"*/}
-                                {/*    width={32}*/}
-                                {/*    height={32}*/}
-                                {/*    className="rounded-full"*/}
-                                {/*/>*/}
+                                <img
+                                    src='/default-avatar.png'
+                                    alt="Profile"
+                                    width={32}
+                                    height={32}
+                                    className="rounded-full"
+                                />
                                 {/*<span className="font-medium">{user?.name}</span>*/}
                             </div>
+                            <ThemeToggle />
                         </div>
                     </div>
                 </header>
