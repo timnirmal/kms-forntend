@@ -8,7 +8,7 @@ export default async function Layout({children}: { children: React.ReactNode; })
 
     // if user move to dashboard
     if (user) {
-        return redirect("/protected");
+        return redirect("/dashboard");
     }
 
     console.log(user)
