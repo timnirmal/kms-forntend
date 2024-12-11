@@ -1,8 +1,5 @@
 'use client';
 
-import {GeistSans} from "geist/font/sans";
-import {ThemeProvider} from "next-themes";
-import NavBar from "@/components/NavBar";
 import Link from "next/link";
 import {
     FiHome,
@@ -18,8 +15,7 @@ import {
 } from 'react-icons/fi';
 import {useState} from "react";
 import ThemeToggle from "@/components/ThemeToggle";
-// import {createClient} from "@/utils/supabase/client";
-// import {redirect} from "next/navigation";
+import {signOutAction} from "@/app/actions";
 
 
 export default function RootLayout({children,}: { children: React.ReactNode; }) {
@@ -146,7 +142,7 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
                                                 <span>Profile</span>
                                             </Link>
                                             <button
-                                                // onClick={() => signOut()}
+                                                onClick={() => signOutAction()}
                                                 className="w-full flex items-center space-x-3 px-4 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700 text-red-500"
                                             >
                                                 <FiLogOut className="w-5 h-5"/>

@@ -6,6 +6,10 @@ import Image from 'next/image';
 import { FiEdit2, FiSave, FiX } from 'react-icons/fi';
 import { createClient } from "@/utils/supabase/client";
 import { v4 as uuidv4 } from 'uuid';
+import { SubmitButton } from "@/components/submit-button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { FormMessage, Message } from "@/components/form-message";
 
 interface EditableField {
     username: boolean;
@@ -18,7 +22,11 @@ interface CombinedUserData {
     avatar_url: string | null;
 }
 
-export default function Profile() {
+export default function Profile({
+                                    searchParams,
+                                }: {
+    searchParams: Message;
+}) {
     const supabase = createClient();
     const router = useRouter();
 
@@ -29,6 +37,10 @@ export default function Profile() {
     const [success, setSuccess] = useState('');
     const [editing, setEditing] = useState<EditableField>({ username: false });
     const [formData, setFormData] = useState({ username: '' });
+    const [passwordData, setPasswordData] = useState({
+        newPassword: '',
+        confirmPassword: '',
+    });
 
     useEffect(() => {
         const fetchUserData = async () => {
@@ -148,6 +160,33 @@ export default function Profile() {
         }
     };
 
+    const handlePasswordReset = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        setSuccess('');
+
+        if (passwordData.newPassword !== passwordData.confirmPassword) {
+            setError('Passwords do not match.');
+            return;
+        }
+
+        try {
+            const { error } = await supabase.auth.updateUser({
+                password: passwordData.newPassword,
+            });
+
+            if (error) {
+                throw new Error(error.message);
+            }
+
+            setPasswordData({ newPassword: '', confirmPassword: '' });
+            setSuccess('Password reset successfully.');
+        } catch (err) {
+            console.error('Password reset error:', err);
+            setError(err instanceof Error ? err.message : 'Failed to reset password.');
+        }
+    };
+
     if (isLoading) {
         return (
             <div className="flex justify-center items-center h-screen">
@@ -252,6 +291,50 @@ export default function Profile() {
                 <div className="mt-6">
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
                     <p className="text-gray-900 dark:text-white">{combinedUserData.email}</p>
+                </div>
+
+                {/* Reset Password Section */}
+                <div className="mt-6">
+                    <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Reset Password</h2>
+                    <form onSubmit={handlePasswordReset} className="space-y-6">
+                        <div>
+                            <Label
+                                htmlFor="password"
+                                className="block text-sm font-medium text-gray-700 dark:text-gray-200"
+                            >
+                                New Password
+                            </Label>
+                            <Input
+                                type="password"
+                                value={passwordData.newPassword}
+                                onChange={(e) => setPasswordData({ ...passwordData, newPassword: e.target.value })}
+                                placeholder="New password"
+                                required
+                                className="mt-1 block w-full px-3 py-2 bg-white dark:bg-zinc-700 border border-gray-300 dark:border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                            />
+                        </div>
+                        <div>
+                            <Label
+                                htmlFor="confirmPassword"
+                                className="block text-sm font-medium text-gray-700 dark:text-gray-200"
+                            >
+                                Confirm Password
+                            </Label>
+                            <Input
+                                type="password"
+                                value={passwordData.confirmPassword}
+                                onChange={(e) => setPasswordData({ ...passwordData, confirmPassword: e.target.value })}
+                                placeholder="Confirm password"
+                                required
+                                className="mt-1 block w-full px-3 py-2 bg-white dark:bg-zinc-700 border border-gray-300 dark:border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                            />
+                        </div>
+                        <SubmitButton className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                            Reset Password
+                        </SubmitButton>
+                        {error && <FormMessage message={{ type: 'error', text: error }} />}
+                        {success && <FormMessage message={{ type: 'success', text: success }} />}
+                    </form>
                 </div>
             </div>
         </div>
