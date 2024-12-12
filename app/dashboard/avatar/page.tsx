@@ -6,10 +6,10 @@ import { ItemType } from '@openai/realtime-api-beta/dist/lib/client.js';
 import { WavRecorder, WavStreamPlayer } from '@/lib/wavtools/index.js';
 import { instructions } from '@/utils/conversation_config.js';
 import { WavRenderer } from '@/utils/wav_renderer';
-import { X, Zap, Mic, MicOff } from 'react-feather';
-import { Toggle } from '@/components/toggle/Toggle';
 import { v4 as uuidv4 } from 'uuid';
-import {createClient} from "@/utils/supabase/client";
+import { createClient } from "@/utils/supabase/client";
+import ConversationView from './ConversationView';
+import LogsView from './LogsView';
 
 export default function ConsolePage() {
     const supabase = createClient();
@@ -21,7 +21,13 @@ export default function ConsolePage() {
     const [sessionId] = useState<string>(uuidv4());
     const [showLogs, setShowLogs] = useState(false);
 
-    // Chat Method: 'vad' or 'push_to_talk'
+    // Modes: 'text' or 'voice'
+    // Start in text mode
+    const [mode, setMode] = useState<'text' | 'voice'>('text');
+    const [hasReturnedToTextMode, setHasReturnedToTextMode] = useState(false);
+    // Once we switch to voice and then back to text, we cannot switch to voice again.
+
+    // Chat Method: 'vad' or 'push_to_talk' (hardcoded to push_to_talk for voice mode)
     const [chatMethod] = useState<'vad' | 'push_to_talk'>('push_to_talk');
 
     const apiKey = process.env.NEXT_PUBLIC_OPENAI_KEY || '';
@@ -55,13 +61,7 @@ export default function ConsolePage() {
         const hs = Math.floor(delta / 10) % 100;
         const s = Math.floor(delta / 1000) % 60;
         const m = Math.floor(delta / 60_000) % 60;
-        const pad = (n: number) => {
-            let s = n + '';
-            while (s.length < 2) {
-                s = '0' + s;
-            }
-            return s;
-        };
+        const pad = (n: number) => (n < 10 ? `0${n}` : n.toString());
         return `${pad(m)}:${pad(s)}.${pad(hs)}`;
     }, []);
 
@@ -82,11 +82,12 @@ export default function ConsolePage() {
 
         await wavRecorder.begin();
         await wavStreamPlayer.connect();
-
         await client.connect();
+
+        // Send an initial greeting message
         client.sendUserMessageContent([{ type: `input_text`, text: `Hello!` }]);
 
-        // If using VAD, start recording immediately
+        // If using VAD (not currently, but if changed), start recording immediately
         if (client.getTurnDetectionType() === 'server_vad' && chatMethod === 'vad') {
             await wavRecorder.record((data) => client.appendInputAudio(data.mono));
         }
@@ -108,23 +109,47 @@ export default function ConsolePage() {
     }, []);
 
     const startRecording = async () => {
+        // If not connected, connect first (voice mode only)
+        if (!isConnected && mode === 'voice') {
+            await connectConversation();
+        }
+
         setIsRecording(true);
         const client = clientRef.current;
         const wavRecorder = wavRecorderRef.current;
         const wavStreamPlayer = wavStreamPlayerRef.current;
+
         const trackSampleOffset = await wavStreamPlayer.interrupt();
         if (trackSampleOffset?.trackId) {
             const { trackId, offset } = trackSampleOffset;
             await client.cancelResponse(trackId, offset);
         }
-        await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+
+        try {
+            if (!wavRecorder.recording) {
+                await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+            }
+        } catch (e) {
+            console.error('Error starting recorder:', e);
+            setIsRecording(false);
+        }
     };
 
     const stopRecording = async () => {
+        if (!isRecording) return; // Don't pause if we are not recording
+
         setIsRecording(false);
         const client = clientRef.current;
         const wavRecorder = wavRecorderRef.current;
-        await wavRecorder.pause();
+
+        if (wavRecorder.recording) {
+            try {
+                await wavRecorder.pause();
+            } catch (e) {
+                console.error('Error pausing recorder:', e);
+            }
+        }
+
         client.createResponse();
     };
 
@@ -141,6 +166,39 @@ export default function ConsolePage() {
             await wavRecorder.record((data) => client.appendInputAudio(data.mono));
         }
         setCanPushToTalk(value === 'none');
+    };
+
+    // Handle sending text messages in text mode
+    const [textInput, setTextInput] = useState('');
+
+    const sendTextMessage = () => {
+        if (mode === 'text' && textInput.trim()) {
+            // Just append to local conversation in text mode (no realtime connection)
+            setItems((prev) => [
+                ...prev,
+                {
+                    id: uuidv4(),
+                    role: 'user',
+                    type: 'input_text',
+                    formatted: { text: textInput.trim() }
+                }
+            ]);
+            setTextInput('');
+        }
+    };
+
+    // Switch between modes
+    const switchMode = async () => {
+        if (mode === 'text') {
+            // Switch to voice mode
+            await connectConversation();
+            setMode('voice');
+        } else {
+            // Switch back to text mode from voice mode
+            await disconnectConversation();
+            setMode('text');
+            setHasReturnedToTextMode(true);
+        }
     };
 
     useEffect(() => {
@@ -164,12 +222,12 @@ export default function ConsolePage() {
 
     useEffect(() => {
         let isLoaded = true;
-
         const wavRecorder = wavRecorderRef.current;
+        const wavStreamPlayer = wavStreamPlayerRef.current;
+
         const clientCanvas = clientCanvasRef.current;
         let clientCtx: CanvasRenderingContext2D | null = null;
 
-        const wavStreamPlayer = wavStreamPlayerRef.current;
         const serverCanvas = serverCanvasRef.current;
         let serverCtx: CanvasRenderingContext2D | null = null;
 
@@ -189,6 +247,7 @@ export default function ConsolePage() {
                         WavRenderer.drawBars(clientCanvas, clientCtx, result.values, '#0099ff', 10, 0, 8);
                     }
                 }
+
                 if (serverCanvas) {
                     if (!serverCanvas.width || !serverCanvas.height) {
                         serverCanvas.width = serverCanvas.offsetWidth;
@@ -203,6 +262,7 @@ export default function ConsolePage() {
                         WavRenderer.drawBars(serverCanvas, serverCtx, result.values, '#009900', 10, 0, 8);
                     }
                 }
+
                 window.requestAnimationFrame(render);
             }
         };
@@ -306,18 +366,24 @@ export default function ConsolePage() {
 
         client.on('conversation.updated', async ({ item, delta }: any) => {
             const newItems = client.conversation.getItems();
+
             // If there's audio, add to player
             if (delta?.audio) {
-                wavStreamPlayer.add16BitPCM(delta.audio, item.id);
+                wavStreamPlayerRef.current.add16BitPCM(delta.audio, item.id);
             }
+
             // If item completed with audio, decode
             if (item.status === 'completed' && item.formatted.audio?.length) {
-                const wavFile = await WavRecorder.decode(item.formatted.audio, 24000, 24000);
-                item.formatted.file = wavFile;
+                try {
+                    const wavFile = await WavRecorder.decode(item.formatted.audio, 24000, 24000);
+                    item.formatted.file = wavFile;
+                    console.log('Decoded audio file:', wavFile);
+                } catch (error) {
+                    console.error('Error decoding audio file:', error);
+                }
             }
 
             setItems(newItems);
-            // Insert this item into the database
             insertMessageIntoDB(item).catch(console.error);
         });
 
@@ -326,265 +392,59 @@ export default function ConsolePage() {
         return () => {
             client.reset();
         };
-    }, [sessionId, selectedCategory]);
+    }, [sessionId, selectedCategory, supabase]);
+
+    const deleteConversationItem = useCallback((id: string) => {
+        const client = clientRef.current;
+        client.deleteItem(id);
+    }, []);
 
     return (
-        <div className="flex flex-col min-h-screen bg-white dark:bg-black text-gray-600 dark:text-gray-300 p-4">
-            <div className="flex justify-between items-center mb-4">
-                <div className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
+        <main className="flex flex-col min-h-screen bg-gradient-to-b from-zinc-200 to-white dark:from-zinc-900 dark:to-black text-gray-600 dark:text-gray-300 px-4">
+            <div className="w-full flex items-center justify-between py-4">
+                <h1 className="text-2xl md:text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
                     Knowledge Management Chat
-                </div>
-                <div className="flex gap-2">
-                    {/*<button*/}
-                    {/*    onClick={() => setShowLogs(!showLogs)}*/}
-                    {/*    className="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-zinc-800"*/}
-                    {/*>*/}
-                    {/*    {showLogs ? 'Hide Logs' : 'Show Logs'}*/}
-                    {/*</button>*/}
+                </h1>
+                <div className="flex gap-4">
                     <button
-                        className={`px-4 py-2 rounded-lg text-white ${
-                            isConnected ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
-                        }`}
-                        onClick={isConnected ? disconnectConversation : connectConversation}
+                        className="inline-flex items-center px-6 py-2 border border-transparent text-base font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none transition-colors"
+                        onClick={switchMode}
+                        disabled={hasReturnedToTextMode && mode === 'text'}
                     >
-                        {isConnected ? 'Disconnect' : 'Connect'}
+                        {mode === 'text' ? (hasReturnedToTextMode ? 'Text Mode (Voice disabled)' : 'Switch to Voice Mode') : 'Switch to Text Mode'}
                     </button>
                 </div>
             </div>
 
-            {/* Conversation Area */}
             <div className="flex flex-col md:flex-row gap-4 flex-1">
-                <div className="flex-1 flex flex-col border border-gray-300 dark:border-gray-600 rounded-lg">
-                    <div className="flex items-center justify-between px-4 py-2 border-b border-gray-300 dark:border-gray-600">
-                        <div className="font-bold">Conversation</div>
-                        <Toggle
-                            defaultValue={chatMethod === 'vad'}
-                            labels={['manual', 'vad']}
-                            values={['none', 'server_vad']}
-                            onChange={(_, value) => changeTurnEndType(value)}
-                        />
-                    </div>
-                    <div
-                        className="flex-1 overflow-y-auto p-4 bg-gray-50 dark:bg-zinc-900"
-                        data-conversation-content
-                    >
-                        {!items.length && (
-                            <div className="text-center text-gray-500 dark:text-gray-400">Awaiting Connection...</div>
-                        )}
-                        {items.map((conversationItem) => {
-                            const role = conversationItem.role || (conversationItem.type === 'function_call_output' ? 'function' : 'system');
-                            const isUser = role === 'user';
-                            const isAssistant = role === 'assistant';
-                            const isFunction = role === 'function';
+                <ConversationView
+                    items={items}
+                    mode={mode}
+                    chatMethod={chatMethod}
+                    isConnected={isConnected}
+                    isRecording={isRecording}
+                    canPushToTalk={canPushToTalk}
+                    startRecording={startRecording}
+                    stopRecording={stopRecording}
+                    changeTurnEndType={changeTurnEndType}
+                    deleteConversationItem={deleteConversationItem}
+                    textInput={textInput}
+                    setTextInput={setTextInput}
+                    sendTextMessage={sendTextMessage}
+                />
 
-                            return (
-                                <div
-                                    key={conversationItem.id}
-                                    className={`mb-4 flex ${isUser ? 'justify-end' : 'justify-start'}`}
-                                >
-                                    <div
-                                        className={`relative max-w-sm p-3 rounded-xl ${
-                                            isUser
-                                                ? 'bg-blue-600 text-white'
-                                                : isAssistant
-                                                    ? 'bg-white dark:bg-zinc-800 text-gray-800 dark:text-gray-200'
-                                                    : 'bg-gray-200 dark:bg-zinc-700 text-gray-800 dark:text-gray-200'
-                                        }`}
-                                    >
-                                        {conversationItem.type !== 'function_call_output' && (
-                                            <>
-                                                {conversationItem.formatted.tool && (
-                                                    <div className="italic text-sm text-gray-500 dark:text-gray-400 mb-1">
-                                                        Query: {(() => {
-                                                        try {
-                                                            const args =
-                                                                typeof conversationItem.formatted.tool.arguments === 'string'
-                                                                    ? JSON.parse(conversationItem.formatted.tool.arguments)
-                                                                    : conversationItem.formatted.tool.arguments;
-                                                            return args.query || '(No query available)';
-                                                        } catch (error) {
-                                                            console.error('Error parsing arguments:', error);
-                                                            return '(Invalid arguments format)';
-                                                        }
-                                                    })()}
-                                                    </div>
-                                                )}
-                                                {!conversationItem.formatted.tool && role === 'user' && (
-                                                    <div className="whitespace-pre-wrap">
-                                                        {conversationItem.formatted.transcript ||
-                                                            (conversationItem.formatted.audio?.length
-                                                                ? '(awaiting transcript)'
-                                                                : conversationItem.formatted.text ||
-                                                                '(item sent)')}
-                                                    </div>
-                                                )}
-                                                {!conversationItem.formatted.tool && role === 'assistant' && (
-                                                    <div className="whitespace-pre-wrap">
-                                                        {conversationItem.formatted.transcript ||
-                                                            conversationItem.formatted.text ||
-                                                            '(truncated)'}
-                                                    </div>
-                                                )}
-                                                {conversationItem.formatted.file && (
-                                                    <audio
-                                                        src={conversationItem.formatted.file.url}
-                                                        controls
-                                                        className="mt-2"
-                                                    />
-                                                )}
-                                            </>
-                                        )}
-                                        <button
-                                            onClick={() => {
-                                                const client = clientRef.current;
-                                                client.deleteItem(conversationItem.id);
-                                            }}
-                                            className="absolute top-2 right-2 text-gray-400 hover:text-gray-600"
-                                        >
-                                            <X size={16} />
-                                        </button>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                    <div className="flex items-center p-2 border-t border-gray-300 dark:border-gray-600">
-                        {/* If chatMethod === 'push_to_talk' show push-to-talk button */}
-                        {chatMethod === 'push_to_talk' && isConnected && canPushToTalk && (
-                            <button
-                                onMouseDown={startRecording}
-                                onMouseUp={stopRecording}
-                                className={`px-4 py-2 rounded-lg text-white ${isRecording ? 'bg-red-600' : 'bg-blue-600'} hover:bg-blue-700 flex items-center gap-2`}
-                            >
-                                {isRecording ? <MicOff /> : <Mic />}
-                                {isRecording ? 'Release to Send' : 'Push to Talk'}
-                            </button>
-                        )}
-
-                        {/* If chatMethod === 'vad', just show a mic state */}
-                        {chatMethod === 'vad' && isConnected && (
-                            <div className="flex items-center gap-2 text-gray-700 dark:text-gray-200">
-                                <Mic />
-                                {isRecording ? 'Listening...' : 'Connected'}
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                {showLogs && (
-                    <div className="w-full md:w-1/3 flex flex-col border border-gray-300 dark:border-gray-600 rounded-lg">
-                        <div className="font-bold p-2 border-b border-gray-300 dark:border-gray-600">Events Log</div>
-                        <div className="flex items-center justify-between p-2">
-                            <div className="text-sm text-gray-500 dark:text-gray-400">Client (blue) / Server (green)</div>
-                        </div>
-                        <div className="p-2 flex gap-2">
-                            <div className="flex-1 bg-gray-50 dark:bg-zinc-800" style={{ height: '50px' }}>
-                                <canvas ref={clientCanvasRef} className="w-full h-full" />
-                            </div>
-                            <div className="flex-1 bg-gray-50 dark:bg-zinc-800" style={{ height: '50px' }}>
-                                <canvas ref={serverCanvasRef} className="w-full h-full" />
-                            </div>
-                        </div>
-                        <div
-                            className="flex-1 overflow-y-auto text-sm p-2 bg-gray-50 dark:bg-zinc-900"
-                            ref={eventsScrollRef}
-                        >
-                            {!realtimeEvents.length && `Awaiting Connection...`}
-                            {(() => {
-                                let lastInputAudioBufferTime: Date | null = null;
-                                let lastFunctionCallTime: Date | null = null;
-
-                                return realtimeEvents
-                                    .filter((realtimeEvent) => {
-                                        const source = realtimeEvent.source;
-                                        const eventType = realtimeEvent.event.type;
-                                        const output = realtimeEvent.event.response?.output;
-                                        return (
-                                            (source === 'client' && eventType === 'input_audio_buffer.commit') ||
-                                            (source === 'server' && eventType === 'response.content_part.added') ||
-                                            (source === 'server' &&
-                                                eventType === 'response.done' &&
-                                                output?.some((item: { type: string }) => item.type === 'function_call'))
-                                        );
-                                    })
-                                    .map((realtimeEvent) => {
-                                        const count = realtimeEvent.count;
-                                        const event = { ...realtimeEvent.event };
-                                        const eventType = event.type;
-                                        const eventTime = new Date(realtimeEvent.time);
-
-                                        let functioncallTimeDifference = null;
-                                        let audioTimeDifference = null;
-                                        let totaltimeDifference = null;
-
-                                        if (eventType === 'input_audio_buffer.commit') {
-                                            lastInputAudioBufferTime = eventTime;
-                                        } else if (eventType === 'response.done' && lastInputAudioBufferTime) {
-                                            functioncallTimeDifference =
-                                                (eventTime.getTime() - lastInputAudioBufferTime.getTime()) / 1000;
-                                            lastFunctionCallTime = eventTime;
-                                        } else if (
-                                            eventType === 'response.content_part.added' &&
-                                            lastFunctionCallTime &&
-                                            lastInputAudioBufferTime
-                                        ) {
-                                            audioTimeDifference =
-                                                (eventTime.getTime() - lastFunctionCallTime.getTime()) / 1000;
-                                            totaltimeDifference =
-                                                (eventTime.getTime() - lastInputAudioBufferTime.getTime()) / 1000;
-                                        }
-
-                                        return (
-                                            <div className="mb-4" key={event.event_id}>
-                                                <div className="font-bold text-gray-800 dark:text-gray-200">
-                                                    {formatTime(realtimeEvent.time)}
-                                                </div>
-                                                <div
-                                                    onClick={() => {
-                                                        const id = event.event_id;
-                                                        const expanded = { ...expandedEvents };
-                                                        if (expanded[id]) {
-                                                            delete expanded[id];
-                                                        } else {
-                                                            expanded[id] = true;
-                                                        }
-                                                        setExpandedEvents(expanded);
-                                                    }}
-                                                    className="cursor-pointer text-gray-700 dark:text-gray-300"
-                                                >
-                          <span className={`mr-2 ${realtimeEvent.source === 'client' ? 'text-blue-600' : 'text-green-600'}`}>
-                            {realtimeEvent.source}
-                          </span>
-                                                    <span>{event.type}{count && ` (${count})`}</span>
-                                                </div>
-                                                {!!expandedEvents[event.event_id] && (
-                                                    <pre className="text-xs bg-gray-200 dark:bg-zinc-700 p-1 rounded whitespace-pre-wrap">
-                            {JSON.stringify(event, null, 2)}
-                          </pre>
-                                                )}
-                                                {functioncallTimeDifference !== null && (
-                                                    <div className="text-xs italic">
-                                                        Total time from input to RAG = {functioncallTimeDifference}s
-                                                    </div>
-                                                )}
-                                                {audioTimeDifference !== null && (
-                                                    <div className="text-xs italic">
-                                                        Total time from RAG to response = {audioTimeDifference}s
-                                                    </div>
-                                                )}
-                                                {totaltimeDifference !== null && (
-                                                    <div className="text-xs italic">
-                                                        Total time from input to response = {totaltimeDifference}s
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    });
-                            })()}
-                        </div>
-                    </div>
-                )}
+                <LogsView
+                    showLogs={showLogs}
+                    setShowLogs={setShowLogs}
+                    realtimeEvents={realtimeEvents}
+                    expandedEvents={expandedEvents}
+                    setExpandedEvents={setExpandedEvents}
+                    formatTime={formatTime}
+                    clientCanvasRef={clientCanvasRef}
+                    serverCanvasRef={serverCanvasRef}
+                    eventsScrollRef={eventsScrollRef}
+                />
             </div>
-        </div>
+        </main>
     );
 }
