@@ -1,5 +1,6 @@
 import { Mic, MicOff, X } from 'react-feather';
 import { ItemType } from '@openai/realtime-api-beta/dist/lib/client.js';
+import {motion} from "framer-motion";
 
 interface ConversationViewProps {
     items: ItemType[];
@@ -36,7 +37,25 @@ export default function ConversationView({
     const isVoiceMode = mode === 'voice';
 
     return (
-        <div className="flex-1 flex flex-col border border-gray-300 dark:border-gray-600 rounded-lg">
+        <div className="p-6">
+            {/* Welcome Banner */}
+            <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-8 mb-6"
+            >
+                <div className="flex justify-between items-center">
+                    <div>
+                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+                            Welcome back,
+                            {/*{session?.user?.name || 'timnirmal'}! 👋*/}
+                        </h1>
+                        <p className="text-gray-600 dark:text-gray-300">
+                            How can I assist you today?
+                        </p>
+                    </div>
+                </div>
+            </motion.div>
             <div
                 className="flex-1 overflow-y-auto p-4 bg-gray-50 dark:bg-zinc-900"
                 data-conversation-content

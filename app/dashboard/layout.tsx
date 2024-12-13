@@ -1,36 +1,51 @@
 'use client';
 
 import Link from "next/link";
-import {
-    FiHome,
-    FiBell,
-    FiSettings,
-    FiUser,
-    FiLogOut,
-    FiCalendar,
-    FiUpload,
-    FiFolder,
-    FiMessageSquare,
-    FiPieChart
-} from 'react-icons/fi';
-import {useState} from "react";
+import {FiHome, FiBell, FiSettings, FiUser, FiLogOut, FiCalendar, FiUpload, FiFolder, FiMessageSquare, FiPieChart} from 'react-icons/fi';
+import {useEffect, useState} from "react";
 import ThemeToggle from "@/components/ThemeToggle";
 import {signOutAction} from "@/app/actions";
+import {createClient} from "@/utils/supabase/client";
+import {redirect} from "next/navigation";
 
 
 export default function RootLayout({children,}: { children: React.ReactNode; }) {
-    // const supabase = createClient();
-    //
-    // const {
-    //     data: {user},
-    // } = await supabase.auth.getUser();
+    const supabase = createClient();
 
-    // if (!user) {
-    //     return redirect("/sign-in");
-    // }
-
+    const [user, setUser] = useState(null);
+    const [profile, setProfile] = useState(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    useEffect(() => {
+        const fetchUser = async () => {
+            const { data: { user }, error } = await supabase.auth.getUser();
+            if (!user) {
+                redirect("/sign-in");
+                return;
+            }
+
+            setUser(user);
+
+            const { data: userProfile, error: profileError } = await supabase
+                .from('profiles')
+                .select('*')
+                .eq('id', user.id)
+                .single();
+
+            if (profileError) {
+                console.error('Failed to fetch user profile:', profileError);
+            } else {
+                setProfile(userProfile);
+            }
+        };
+
+        fetchUser();
+    }, [supabase]);
+
+    if (!user) {
+        return null; // Or a loading spinner
+    }
 
     return (
         <div className="">
