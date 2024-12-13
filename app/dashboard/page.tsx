@@ -98,7 +98,8 @@ export default function DashboardPage() {
                             className="flex-1 p-4 rounded-xl bg-gray-100 dark:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
                         />
                         <button
-                            disabled={!inputMessage.trim()}
+                            onClick={handleSendAndGoToChat}
+                            // disabled={!inputMessage.trim()}
                             className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
                             <FiSend size={20} />
