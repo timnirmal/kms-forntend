@@ -1,16 +1,18 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import {useEffect, useRef, useCallback, useState} from 'react';
 // import { useSession } from 'next-auth/react';
-import { motion } from 'framer-motion';
-import { FiSend, FiMic, FiMicOff, FiPlus } from 'react-icons/fi';
-import { v4 as uuidv4 } from 'uuid';
-import { RealtimeClient } from '@openai/realtime-api-beta';
-import { ItemType } from '@openai/realtime-api-beta/dist/lib/client.js';
-import { WavRecorder, WavStreamPlayer } from '@/lib/wavtools/index.js';
-import { instructions } from '@/utils/conversation_config.js';
-import { createClient } from "@/utils/supabase/client";
-import { WavRenderer } from '@/utils/wav_renderer';
+import {motion} from 'framer-motion';
+import {FiSend, FiMic, FiMicOff, FiPlus} from 'react-icons/fi';
+import {v4 as uuidv4} from 'uuid';
+import {RealtimeClient} from '@openai/realtime-api-beta';
+import {ItemType} from '@openai/realtime-api-beta/dist/lib/client.js';
+import {WavRecorder, WavStreamPlayer} from '@/lib/wavtools/index.js';
+import {instructions} from '@/utils/conversation_config.js';
+import {createClient} from "@/utils/supabase/client";
+import {WavRenderer} from '@/utils/wav_renderer';
+import {usePathname, useRouter} from "next/navigation";
+import DepartmentModal from './department-modal';
 
 interface Message {
     id: string;
@@ -23,6 +25,9 @@ export default function Dashboard() {
     // const { data: session, status } = useSession();
 
     const supabase = createClient();
+    const pathname = usePathname();
+
+    const router = useRouter();
 
     // State for mode: starts in text mode
     const [mode, setMode] = useState<'text' | 'voice'>('text');
@@ -33,14 +38,17 @@ export default function Dashboard() {
     const [isRecording, setIsRecording] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
 
+    const [showDepartmentModal, setShowDepartmentModal] = useState(false);
+    const [department, setDepartment] = useState<string | null>(null);
+
     const [currentChatId, setCurrentChatId] = useState<string>('');
     const chatContainerRef = useRef<HTMLDivElement>(null);
 
     // Voice mode related
     const apiKey = process.env.NEXT_PUBLIC_OPENAI_KEY || '';
-    const [sessionId] = useState<string>(uuidv4());
-    const wavRecorderRef = useRef<WavRecorder>(new WavRecorder({ sampleRate: 24000 }));
-    const wavStreamPlayerRef = useRef<WavStreamPlayer>(new WavStreamPlayer({ sampleRate: 24000 }));
+    const sessionId = pathname.split('/').pop() || '';
+    const wavRecorderRef = useRef<WavRecorder>(new WavRecorder({sampleRate: 24000}));
+    const wavStreamPlayerRef = useRef<WavStreamPlayer>(new WavStreamPlayer({sampleRate: 24000}));
     const clientRef = useRef<RealtimeClient>(
         new RealtimeClient({
             apiKey: apiKey,
@@ -54,32 +62,97 @@ export default function Dashboard() {
     const serverCanvasRef = useRef<HTMLCanvasElement>(null);
 
     useEffect(() => {
-        // Load current chat session if exists
-        const loadCurrentChat = () => {
-            const savedChatId = localStorage.getItem('currentChatId');
-            if (savedChatId) {
-                const sessions = JSON.parse(localStorage.getItem('chatSessions') || '[]');
-                const currentSession = sessions.find((s: any) => s.id === savedChatId);
-                if (currentSession) {
-                    setMessages(currentSession.messages.map((msg: Message) => ({
-                        ...msg,
-                        timestamp: new Date(msg.timestamp)
-                    })));
-                    setCurrentChatId(savedChatId);
-                } else {
-                    const newChatId = Date.now().toString();
-                    setCurrentChatId(newChatId);
-                    localStorage.setItem('currentChatId', newChatId);
+        console.log("Loading useEffect 1")
+        let isLoaded = true;
+        const wavRecorder = wavRecorderRef.current;
+        const wavStreamPlayer = wavStreamPlayerRef.current;
+
+        const clientCanvas = clientCanvasRef.current;
+        let clientCtx: CanvasRenderingContext2D | null = null;
+
+        const serverCanvas = serverCanvasRef.current;
+        let serverCtx: CanvasRenderingContext2D | null = null;
+
+        const render = () => {
+            if (isLoaded) {
+                if (clientCanvas) {
+                    if (!clientCanvas.width || !clientCanvas.height) {
+                        clientCanvas.width = clientCanvas.offsetWidth;
+                        clientCanvas.height = clientCanvas.offsetHeight;
+                    }
+                    clientCtx = clientCtx || clientCanvas.getContext('2d');
+                    if (clientCtx) {
+                        clientCtx.clearRect(0, 0, clientCanvas.width, clientCanvas.height);
+                        const result = wavRecorder.recording
+                            ? wavRecorder.getFrequencies('voice')
+                            : {values: new Float32Array([0])};
+                        WavRenderer.drawBars(clientCanvas, clientCtx, result.values, '#0099ff', 10, 0, 8);
+                    }
                 }
-            } else {
-                const newChatId = Date.now().toString();
-                setCurrentChatId(newChatId);
-                localStorage.setItem('currentChatId', newChatId);
+
+                if (serverCanvas) {
+                    if (!serverCanvas.width || !serverCanvas.height) {
+                        serverCanvas.width = serverCanvas.offsetWidth;
+                        serverCanvas.height = serverCanvas.offsetHeight;
+                    }
+                    serverCtx = serverCtx || serverCanvas.getContext('2d');
+                    if (serverCtx) {
+                        serverCtx.clearRect(0, 0, serverCanvas.width, serverCanvas.height);
+                        const result = wavStreamPlayer.analyser
+                            ? wavStreamPlayer.getFrequencies('voice')
+                            : {values: new Float32Array([0])};
+                        WavRenderer.drawBars(serverCanvas, serverCtx, result.values, '#009900', 10, 0, 8);
+                    }
+                }
+
+                window.requestAnimationFrame(render);
             }
         };
+        render();
 
-        loadCurrentChat();
+        return () => {
+            isLoaded = false;
+        };
     }, []);
+
+
+    useEffect(() => {
+        console.log("Loading useEffect 2")
+        const savedMode = localStorage.getItem('mode');
+        if (savedMode === 'text' || savedMode === 'voice') {
+            setMode(savedMode);
+        }
+
+        const savedDepartment = localStorage.getItem('department');
+        // if (savedDepartment) {
+        //     setDepartment(savedDepartment);
+        // }
+
+        // Check if there's an initial message stored
+        const initialMessage = localStorage.getItem(`initialMessage-${sessionId}`);
+        console.log(savedMode)
+        console.log(savedDepartment)
+        console.log(`initialMessage-${sessionId}`)
+        console.log(initialMessage)
+
+        if (initialMessage) {
+            const userMessage: Message = {
+                id: Date.now().toString(),
+                content: initialMessage,
+                type: 'user',
+                timestamp: new Date(),
+            };
+            setMessages([userMessage]);
+            localStorage.removeItem(`initialMessage-${sessionId}`);
+
+            // handleAssistantResponse([userMessage]);
+        } else {
+            // If no initial message, load from DB or start empty
+            // Example: Fetch from your database if needed
+            // setMessages([]) // starting empty for now
+        }
+    }, [sessionId]);
+
 
     useEffect(() => {
         if (chatContainerRef.current) {
@@ -136,7 +209,7 @@ export default function Dashboard() {
         // If in voice mode and connected, send to OpenAI realtime
         if (mode === 'voice' && isConnected) {
             clientRef.current.sendUserMessageContent([
-                { type: 'input_text', text: userMessage.content }
+                {type: 'input_text', text: userMessage.content}
             ]);
             // The assistant's response will come via conversation.updated event
             setIsProcessing(false);
@@ -151,7 +224,7 @@ export default function Dashboard() {
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ messages: updatedMessages }),
+                    body: JSON.stringify({messages: updatedMessages}),
                 });
 
                 if (!response.ok) {
@@ -200,7 +273,7 @@ export default function Dashboard() {
 
         const trackSampleOffset = await wavStreamPlayer.interrupt();
         if (trackSampleOffset?.trackId) {
-            const { trackId, offset } = trackSampleOffset;
+            const {trackId, offset} = trackSampleOffset;
             await client.cancelResponse(trackId, offset);
         }
 
@@ -243,8 +316,8 @@ export default function Dashboard() {
         await wavStreamPlayer.connect();
         await client.connect();
 
-        client.updateSession({ instructions: instructions });
-        client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
+        client.updateSession({instructions: instructions});
+        client.updateSession({input_audio_transcription: {model: 'whisper-1'}});
 
         setIsConnected(true);
 
@@ -264,7 +337,7 @@ export default function Dashboard() {
                     required: ['query']
                 }
             },
-            async ({ query }: { query: string }) => {
+            async ({query}: { query: string }) => {
                 try {
                     const response = await fetch('http://localhost:11000/complete-query', {
                         method: 'POST',
@@ -293,7 +366,7 @@ export default function Dashboard() {
             }
         );
 
-        client.on('conversation.updated', async ({ item, delta }: any) => {
+        client.on('conversation.updated', async ({item, delta}: any) => {
             const clientItems = client.conversation.getItems();
 
             // Convert items to messages
@@ -340,12 +413,12 @@ export default function Dashboard() {
         client.on('conversation.interrupted', async () => {
             const trackSampleOffset = await wavStreamPlayer.interrupt();
             if (trackSampleOffset?.trackId) {
-                const { trackId, offset } = trackSampleOffset;
+                const {trackId, offset} = trackSampleOffset;
                 await client.cancelResponse(trackId, offset);
             }
         });
         // Send a welcome message
-        client.sendUserMessageContent([{ type: 'input_text', text: 'Hello!' }]);
+        client.sendUserMessageContent([{type: 'input_text', text: 'Hello!'}]);
     }, [isConnected, instructions]);
 
     const disconnectConversation = useCallback(async () => {
@@ -377,58 +450,14 @@ export default function Dashboard() {
         setHasReturnedToTextMode(true);
     };
 
-    useEffect(() => {
-        let isLoaded = true;
-        const wavRecorder = wavRecorderRef.current;
-        const wavStreamPlayer = wavStreamPlayerRef.current;
+    const handleDepartmentSelected = (dept: string) => {
+        localStorage.setItem('department', dept);
+        setDepartment(dept);
+        setShowDepartmentModal(false);
+        // Redirect back to dashboard
+        router.push('/dashboard');
+    };
 
-        const clientCanvas = clientCanvasRef.current;
-        let clientCtx: CanvasRenderingContext2D | null = null;
-
-        const serverCanvas = serverCanvasRef.current;
-        let serverCtx: CanvasRenderingContext2D | null = null;
-
-        const render = () => {
-            if (isLoaded) {
-                if (clientCanvas) {
-                    if (!clientCanvas.width || !clientCanvas.height) {
-                        clientCanvas.width = clientCanvas.offsetWidth;
-                        clientCanvas.height = clientCanvas.offsetHeight;
-                    }
-                    clientCtx = clientCtx || clientCanvas.getContext('2d');
-                    if (clientCtx) {
-                        clientCtx.clearRect(0, 0, clientCanvas.width, clientCanvas.height);
-                        const result = wavRecorder.recording
-                            ? wavRecorder.getFrequencies('voice')
-                            : { values: new Float32Array([0]) };
-                        WavRenderer.drawBars(clientCanvas, clientCtx, result.values, '#0099ff', 10, 0, 8);
-                    }
-                }
-
-                if (serverCanvas) {
-                    if (!serverCanvas.width || !serverCanvas.height) {
-                        serverCanvas.width = serverCanvas.offsetWidth;
-                        serverCanvas.height = serverCanvas.offsetHeight;
-                    }
-                    serverCtx = serverCtx || serverCanvas.getContext('2d');
-                    if (serverCtx) {
-                        serverCtx.clearRect(0, 0, serverCanvas.width, serverCanvas.height);
-                        const result = wavStreamPlayer.analyser
-                            ? wavStreamPlayer.getFrequencies('voice')
-                            : { values: new Float32Array([0]) };
-                        WavRenderer.drawBars(serverCanvas, serverCtx, result.values, '#009900', 10, 0, 8);
-                    }
-                }
-
-                window.requestAnimationFrame(render);
-            }
-        };
-        render();
-
-        return () => {
-            isLoaded = false;
-        };
-    }, []);
 
     // if (status === 'loading') {
     //     return (
@@ -440,10 +469,16 @@ export default function Dashboard() {
 
     return (
         <div className="p-6">
+            {showDepartmentModal && (
+                <DepartmentModal
+                    onClose={() => setShowDepartmentModal(false)}
+                    onSelect={handleDepartmentSelected}
+                />
+            )}
             {/* Welcome Banner */}
             <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
+                initial={{opacity: 0, y: 20}}
+                animate={{opacity: 1, y: 0}}
                 className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-8 mb-6"
             >
                 <div className="flex justify-between items-center">
@@ -469,7 +504,7 @@ export default function Dashboard() {
                             onClick={handleNewChat}
                             className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
                         >
-                            <FiPlus className="w-5 h-5" />
+                            <FiPlus className="w-5 h-5"/>
                             <span>New Chat</span>
                         </button>
                     </div>
@@ -502,8 +537,10 @@ export default function Dashboard() {
                                 <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4">
                                     <div className="flex space-x-2">
                                         <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
-                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                                             style={{animationDelay: '150ms'}}></div>
+                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                                             style={{animationDelay: '300ms'}}></div>
                                     </div>
                                 </div>
                             </div>
@@ -538,7 +575,7 @@ export default function Dashboard() {
                                     disabled={!inputMessage.trim()}
                                     className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                 >
-                                    <FiSend size={20} />
+                                    <FiSend size={20}/>
                                 </button>
                             </>
                         ) : (
@@ -553,7 +590,7 @@ export default function Dashboard() {
                                             : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
                                     }`}
                                 >
-                                    {isRecording ? <FiMicOff size={20} /> : <FiMic size={20} />}
+                                    {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
                                 </button>
                                 <button
                                     onClick={cancelVoiceMode}

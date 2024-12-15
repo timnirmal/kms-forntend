@@ -13,6 +13,8 @@ export default function DashboardPage() {
     const [inputMessage, setInputMessage] = useState('');
     const [isRecording, setIsRecording] = useState(false); // Dummy state, no functionality here
 
+    const [showDepartmentModal, setShowDepartmentModal] = useState(false);
+
     useEffect(() => {
         const savedMode = localStorage.getItem('mode');
         if (savedMode === 'text' || savedMode === 'voice') {
@@ -33,11 +35,13 @@ export default function DashboardPage() {
 
     const handleSendAndGoToChat = () => {
         if (!inputMessage.trim()) return;
+        console.log(inputMessage)
         const newSessionId = uuidv4();
         localStorage.setItem('mode', mode);
         if (selectedDepartment) {
             localStorage.setItem('department', selectedDepartment);
         }
+        console.log(`initialMessage-${newSessionId}`)
         localStorage.setItem(`initialMessage-${newSessionId}`, inputMessage);
         router.push(`/dashboard/${newSessionId}`);
     };
@@ -55,6 +59,7 @@ export default function DashboardPage() {
         // Dummy: no functionality here, no modal at dashboard level
         // Just showing a button similar to [id] page for UI clone
         // If needed, you can open a modal here as well, but user requested to do that in [id] only.
+        setShowDepartmentModal(true);
     };
 
     return (
