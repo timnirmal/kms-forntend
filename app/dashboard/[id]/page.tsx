@@ -346,7 +346,8 @@ export default function Dashboard() {
                     // Get assistant response
                     setIsProcessing(true);
                     try {
-                        const response = await fetch('http://localhost:11000/complete-query', {
+                        // Initial Message
+                        const response = await fetch('/api/chat', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json',},
                             body: JSON.stringify({
@@ -361,7 +362,7 @@ export default function Dashboard() {
                         }
 
                         const data = await response.json();
-                        const assistantMessageContent = data.answer;
+                        const assistantMessageContent = data.message;
 
                         // Insert assistant message into chat table (Realtime will update UI)
                         const {error: insertError} = await supabase
@@ -469,6 +470,7 @@ export default function Dashboard() {
         return last10.map(m => {
             let speakerName = 'assistant';
             if (m.type === 'user') {
+                console.log(collaborators)
                 const userColab = collaborators.find(c => c.user_id === m.user_id);
                 speakerName = userColab ? `user (${userColab.username})` : 'user (unknown)';
             }
@@ -505,7 +507,8 @@ export default function Dashboard() {
 
         // Get assistant response
         try {
-            const response = await fetch('http://localhost:11000/complete-query', {
+            // Text Response
+            const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(body)
@@ -514,7 +517,7 @@ export default function Dashboard() {
             if (!response.ok) throw new Error('Failed to get assistant response');
 
             const data = await response.json();
-            const assistantMessageContent = data.answer;
+            const assistantMessageContent = data.message;
 
             // Insert assistant message into DB (Realtime shows it)
             const {error: insertError} = await supabase
@@ -597,7 +600,7 @@ export default function Dashboard() {
             },
             async ({query}: { query: string }) => {
                 try {
-                    const response = await fetch('http://localhost:11000/complete-query', {
+                    const response = await fetch(`${process.env.NEXT_PUBLIC_RETRIVEL_BACKEND}/complete-query`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -904,35 +907,45 @@ export default function Dashboard() {
                         ref={chatContainerRef}
                         className="h-[calc(100vh-28rem)] overflow-y-auto mb-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-zinc-600"
                     >
-                        {messages.map((message) => (
-                            <div
-                                key={message.id}
-                                className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-                            >
+                        {messages.map((message) => {
+                            const sender = collaborators.find(c => c.user_id === message.user_id);
+                            const senderName = sender ? sender.username : (message.type === 'assistant' ? 'Assistant' : 'Unknown');
+                            const senderAvatar = sender?.avatar_url || (message.type === 'assistant' ? '/assistant-avatar.png' : '/default-avatar.png');
+
+                            return (
                                 <div
-                                    className={`max-w-[70%] rounded-lg p-4 ${
-                                        message.type === 'user'
-                                            ? 'bg-blue-500 text-white'
-                                            : message.type === 'assistant'
-                                                ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
-                                                : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
-                                    }`}
+                                    key={message.id}
+                                    className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
                                 >
-                                    {/* Render Markdown Content */}
-                                    <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]} // Enables GitHub Flavored Markdown
-                                        rehypePlugins={[rehypeHighlight, rehypeRaw]} // Enables syntax highlighting
-                                        className="prose dark:prose-invert whitespace-pre-wrap break-words" // Apply Tailwind Typography styles
-                                    >
-                                        {message.content.replace(/\n{2,}/g, '\n')}
-                                        {/*{message.content}*/}
-                                    </ReactMarkdown>
-                                    <p className="text-xs mt-1 opacity-70">
-                                        {new Date(message.created_at).toLocaleTimeString()}
-                                    </p>
+                                    <div className="flex items-start space-x-2 max-w-[70%]">
+                                        {message.type !== 'user' && (
+                                            <img src={senderAvatar} className="w-6 h-6 rounded-full" alt={senderName}/>
+                                        )}
+                                        <div
+                                            className={`flex-1 rounded-lg p-4 ${
+                                                message.type === 'user'
+                                                    ? 'bg-blue-500 text-white'
+                                                    : message.type === 'assistant'
+                                                        ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
+                                                        : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
+                                            }`}
+                                        >
+                                            <div className="flex items-center space-x-2 mb-1">
+                                                <span className="text-xs font-semibold">{message.type === 'assistant' ? 'Assistant' : senderName}</span>
+                                                <span className="text-xs opacity-70">{new Date(message.created_at).toLocaleTimeString()}</span>
+                                            </div>
+                                            <ReactMarkdown
+                                                remarkPlugins={[remarkGfm]}
+                                                rehypePlugins={[rehypeHighlight, rehypeRaw]}
+                                                className="prose dark:prose-invert whitespace-pre-wrap break-words"
+                                            >
+                                                {message.content.replace(/\n{2,}/g, '\n')}
+                                            </ReactMarkdown>
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                         {isProcessing && (
                             <div className="flex justify-start">
                                 <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4">

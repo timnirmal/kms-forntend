@@ -7,10 +7,9 @@ const openai = new OpenAI({
 
 export async function POST(req: Request) {
     try {
-        const { query, department, access_level, messages } = await req.json();
+        const { query, department, access_level, history } = await req.json();
 
-        console.log(query)
-        console.log(query)
+        console.log(`${process.env.NEXT_PUBLIC_RETRIVEL_BACKEND}/complete-query`)
 
         const ragResponse = await fetch(`${process.env.NEXT_PUBLIC_RETRIVEL_BACKEND}/complete-query`, {
             method: 'POST',
@@ -22,8 +21,25 @@ export async function POST(req: Request) {
             throw new Error('Failed to get context from RAG system');
         }
 
-        const ragText = await ragResponse.text();
-        console.log(ragText.answer) // also this is give success:true you can check if context is available. so when sending the context you can say error retriving context
+        const ragData = await ragResponse.json();
+        console.log(ragData.answer) // also this is give success:true you can check if context is available. so when sending the context you can say error retriving context
+
+        // Step 2: Check if context retrieval was successful
+        const context = ragData.success === true ? ragData.answer : "Error retrieving context";
+
+        // Step 3: Prepare message format for OpenAI
+        const formattedContent = `
+## History
+${history}
+
+## Context
+${context}
+
+## Question
+${query}
+        `;
+
+        console.log("Formatted Content:", formattedContent);
 
         const completion = await openai.chat.completions.create({
             model: "gpt-4o-mini",
@@ -31,7 +47,7 @@ export async function POST(req: Request) {
                 { role: "system", content: "You are a helpful assistant for VeracityAI. Answer the given question based on the given context" },
                 {
                     role: "user",
-                    content: messages,
+                    content: formattedContent,
                 },
             ],
             temperature: 0.3,
@@ -40,6 +56,7 @@ export async function POST(req: Request) {
 
         return NextResponse.json({
             message: completion.choices[0].message.content,
+            context: context,
             status: 200
         });
     } catch (error) {
