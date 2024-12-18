@@ -11,6 +11,11 @@ import {instructions} from '@/utils/conversation_config.js';
 import {createClient} from "@/utils/supabase/client";
 import {WavRenderer} from '@/utils/wav_renderer';
 import DepartmentModal from './department-modal';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
+import rehypeRaw from 'rehype-raw';
+
 
 interface Message {
     id: string;
@@ -178,6 +183,7 @@ export default function Dashboard() {
             // Handle assistant response if needed in text mode
             if (sess.mode === 'text' && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
                 setIsProcessing(true);
+                console.log(loadedMessages[0].content)
                 try {
                     const response = await fetch('http://localhost:11000/complete-query', {
                         method: 'POST',
@@ -185,7 +191,7 @@ export default function Dashboard() {
                             'Content-Type': 'application/json',
                         },
                         body: JSON.stringify({
-                            query: "tell me about kms",
+                            query: loadedMessages[0].content,
                             department: ["AI"],
                             access_level: 1
                         })
@@ -664,10 +670,18 @@ export default function Dashboard() {
                                             ? 'bg-blue-500 text-white'
                                             : message.type === 'assistant'
                                                 ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
-                                                : 'bg-red-100 dark:bg-red-700 text-red-900 dark:red-white'
+                                                : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
                                     }`}
                                 >
-                                    <p>{message.content}</p>
+                                    {/* Render Markdown Content */}
+                                    <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]} // Enables GitHub Flavored Markdown
+                                        rehypePlugins={[rehypeHighlight, rehypeRaw]} // Enables syntax highlighting
+                                        className="prose dark:prose-invert whitespace-pre-wrap break-words" // Apply Tailwind Typography styles
+                                    >
+                                        {message.content.replace(/\n{2,}/g, '\n')}
+                                        {/*{message.content}*/}
+                                    </ReactMarkdown>
                                     <p className="text-xs mt-1 opacity-70">
                                         {new Date(message.created_at).toLocaleTimeString()}
                                     </p>
@@ -680,9 +694,9 @@ export default function Dashboard() {
                                     <div className="flex space-x-2">
                                         <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
                                         <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
-                                             style={{animationDelay: '150ms'}}></div>
+                                             style={{ animationDelay: '150ms' }}></div>
                                         <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
-                                             style={{animationDelay: '300ms'}}></div>
+                                             style={{ animationDelay: '300ms' }}></div>
                                     </div>
                                 </div>
                             </div>
