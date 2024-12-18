@@ -1,37 +1,62 @@
 'use client';
 
 import {useEffect, useRef, useCallback, useState} from 'react';
-// import { useSession } from 'next-auth/react';
+import {usePathname, useRouter} from "next/navigation";
 import {motion} from 'framer-motion';
 import {FiSend, FiMic, FiMicOff, FiPlus} from 'react-icons/fi';
-import {v4 as uuidv4} from 'uuid';
 import {RealtimeClient} from '@openai/realtime-api-beta';
 import {ItemType} from '@openai/realtime-api-beta/dist/lib/client.js';
 import {WavRecorder, WavStreamPlayer} from '@/lib/wavtools/index.js';
 import {instructions} from '@/utils/conversation_config.js';
 import {createClient} from "@/utils/supabase/client";
 import {WavRenderer} from '@/utils/wav_renderer';
-import {usePathname, useRouter} from "next/navigation";
 import DepartmentModal from './department-modal';
 
 interface Message {
     id: string;
     content: string;
-    type: 'user' | 'assistant';
-    timestamp: Date;
+    type: 'user' | 'assistant' | 'system';
+    function_call?: string | null;
+    function_call_text?: string | null;
+    created_at: Date;
+}
+
+interface SessionData {
+    session_id: string;
+    user: string;
+    mode: 'text' | 'voice';
+    department: string;
+}
+
+interface ChatRow {
+    chat_id: string;
+    session_id: string;
+    user: string;
+    role: string;
+    message: string;
+    mode: string;
+    created_at: string;
+    function_call?: string | null;
+    function_call_text?: string | null;
+    openai_id?: string | null;
+}
+
+interface CombinedUserDataInterface {
+    id: string;
+    email: string | null;
+    username: string | null;
+    avatar_url: string | null;
 }
 
 export default function Dashboard() {
-    // const { data: session, status } = useSession();
-
     const supabase = createClient();
     const pathname = usePathname();
-
     const router = useRouter();
 
-    // State for mode: starts in text mode
+    // State derived from session record
+    const [sessionData, setSessionData] = useState<SessionData | null>(null);
     const [mode, setMode] = useState<'text' | 'voice'>('text');
-    const [hasReturnedToTextMode, setHasReturnedToTextMode] = useState(false);
+    const [department, setDepartment] = useState<string | null>(null);
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputMessage, setInputMessage] = useState('');
@@ -39,12 +64,11 @@ export default function Dashboard() {
     const [isProcessing, setIsProcessing] = useState(false);
 
     const [showDepartmentModal, setShowDepartmentModal] = useState(false);
-    const [department, setDepartment] = useState<string | null>(null);
 
-    const [currentChatId, setCurrentChatId] = useState<string>('');
-    const chatContainerRef = useRef<HTMLDivElement>(null);
+    // Assume we have user data similar to dashboard page
+    const [combinedUserData, setCombinedUserData] = useState<CombinedUserDataInterface | null>(null);
 
-    // Voice mode related
+    // Voice mode related references
     const apiKey = process.env.NEXT_PUBLIC_OPENAI_KEY || '';
     const sessionId = pathname.split('/').pop() || '';
     const wavRecorderRef = useRef<WavRecorder>(new WavRecorder({sampleRate: 24000}));
@@ -56,103 +80,166 @@ export default function Dashboard() {
         })
     );
     const [isConnected, setIsConnected] = useState(false);
-    const [chatMethod] = useState<'vad' | 'push_to_talk'>('push_to_talk');
+    const connectConversationOnce = useRef(false); // Track whether connectConversation has been called
 
-    const clientCanvasRef = useRef<HTMLCanvasElement>(null);
-    const serverCanvasRef = useRef<HTMLCanvasElement>(null);
+    const chatContainerRef = useRef<HTMLDivElement>(null);
+
+    // This will hold partial transcripts for each openai_id
+    const messageBuffers = useRef<Record<string, {
+        role: 'user' | 'assistant' | 'system',
+        content: string,
+        function_call?: string | null,
+        function_call_text?: string | null,
+        created_at: Date
+    }>>({});
 
     useEffect(() => {
-        console.log("Loading useEffect 1")
-        let isLoaded = true;
-        const wavRecorder = wavRecorderRef.current;
-        const wavStreamPlayer = wavStreamPlayerRef.current;
-
-        const clientCanvas = clientCanvasRef.current;
-        let clientCtx: CanvasRenderingContext2D | null = null;
-
-        const serverCanvas = serverCanvasRef.current;
-        let serverCtx: CanvasRenderingContext2D | null = null;
-
-        const render = () => {
-            if (isLoaded) {
-                if (clientCanvas) {
-                    if (!clientCanvas.width || !clientCanvas.height) {
-                        clientCanvas.width = clientCanvas.offsetWidth;
-                        clientCanvas.height = clientCanvas.offsetHeight;
-                    }
-                    clientCtx = clientCtx || clientCanvas.getContext('2d');
-                    if (clientCtx) {
-                        clientCtx.clearRect(0, 0, clientCanvas.width, clientCanvas.height);
-                        const result = wavRecorder.recording
-                            ? wavRecorder.getFrequencies('voice')
-                            : {values: new Float32Array([0])};
-                        WavRenderer.drawBars(clientCanvas, clientCtx, result.values, '#0099ff', 10, 0, 8);
-                    }
+        const fetchUserData = async () => {
+            try {
+                const {data: {user}} = await supabase.auth.getUser();
+                if (!user) {
+                    router.push("/sign-in");
+                    return;
                 }
 
-                if (serverCanvas) {
-                    if (!serverCanvas.width || !serverCanvas.height) {
-                        serverCanvas.width = serverCanvas.offsetWidth;
-                        serverCanvas.height = serverCanvas.offsetHeight;
-                    }
-                    serverCtx = serverCtx || serverCanvas.getContext('2d');
-                    if (serverCtx) {
-                        serverCtx.clearRect(0, 0, serverCanvas.width, serverCanvas.height);
-                        const result = wavStreamPlayer.analyser
-                            ? wavStreamPlayer.getFrequencies('voice')
-                            : {values: new Float32Array([0])};
-                        WavRenderer.drawBars(serverCanvas, serverCtx, result.values, '#009900', 10, 0, 8);
-                    }
+                const {data: userProfile} = await supabase
+                    .from('profiles')
+                    .select('*')
+                    .eq('id', user.id)
+                    .single();
+
+                if (!userProfile) {
+                    console.error('No profile found for this user');
+                    return;
                 }
 
-                window.requestAnimationFrame(render);
+                const combinedData: CombinedUserDataInterface = {
+                    id: user.id,
+                    email: userProfile.email,
+                    username: userProfile.username,
+                    avatar_url: userProfile.avatar_url,
+                };
+
+                setCombinedUserData(combinedData);
+            } catch (err) {
+                console.error('Error fetching user data:', err);
             }
         };
-        render();
 
-        return () => {
-            isLoaded = false;
-        };
-    }, []);
+        fetchUserData();
+    }, [supabase, router]);
 
-
+    // Load session info and messages
     useEffect(() => {
-        console.log("Loading useEffect 2")
-        const savedMode = localStorage.getItem('mode');
-        if (savedMode === 'text' || savedMode === 'voice') {
-            setMode(savedMode);
+
+        const loadSessionData = async () => {
+            if (!sessionId) return;
+
+            // Fetch session info from Supabase
+            const {data: sessionRows, error: sessionError} = await supabase
+                .from('session')
+                .select('*')
+                .eq('session_id', sessionId)
+                .single();
+
+            if (sessionError || !sessionRows) {
+                console.error('Error loading session:', sessionError);
+                return;
+            }
+
+            const sess = sessionRows as SessionData;
+            setSessionData(sess); // Set session data in state
+            setMode(sess.mode);
+            setDepartment(sess.department);
+
+            // Fetch chat messages
+            const {data: chatData, error: chatError} = await supabase
+                .from('chat')
+                .select('*')
+                .eq('session_id', sessionId)
+                .order('created_at', {ascending: true});
+
+            if (chatError) {
+                console.error('Error fetching chat messages:', chatError);
+                return;
+            }
+
+            const loadedMessages: Message[] = (chatData || []).map((c: ChatRow) => ({
+                id: c.chat_id,
+                content: c.message,
+                type: c.role === 'user' ? 'user' : (c.role === 'assistant' ? 'assistant' : 'system'),
+                function_call: c.function_call || null,
+                function_call_text: c.function_call_text || null,
+                created_at: new Date(c.created_at),
+            }));
+
+            setMessages(loadedMessages);
+
+            // Handle assistant response if needed in text mode
+            if (sess.mode === 'text' && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
+                setIsProcessing(true);
+                try {
+                    const response = await fetch('http://localhost:11000/complete-query', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            query: "tell me about kms",
+                            department: ["AI"],
+                            access_level: 1
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to get assistant response');
+                    }
+
+                    const data = await response.json();
+                    const assistantMessageContent = data.answer;
+
+                    // Insert assistant message into chat table
+                    const {error: insertError, data: insertedChat} = await supabase
+                        .from('chat')
+                        .insert([
+                            {
+                                session_id: sess.session_id,
+                                user: sess.user,
+                                role: 'assistant',
+                                message: assistantMessageContent,
+                                mode: 'text',
+                            },
+                        ]);
+
+                    if (insertError) {
+                        console.error('Error inserting assistant message:', insertError);
+                    } else {
+                        const assistantMessage: Message = {
+                            id: insertedChat?.[0].chat_id || Date.now().toString(),
+                            content: assistantMessageContent,
+                            type: 'assistant',
+                            created_at: new Date(),
+                        };
+                        setMessages([...loadedMessages, assistantMessage]);
+                    }
+                } catch (error) {
+                    console.error('Error fetching assistant response:', error);
+                } finally {
+                    setIsProcessing(false);
+                }
+            }
+
+            // Handle voice mode initialization
+            if (sess.mode === 'voice' && !connectConversationOnce.current && combinedUserData) {
+                connectConversationOnce.current = true; // Ensure connectConversation runs only once
+                await connectConversation(sess, combinedUserData);
+            }
+        };
+
+        if (combinedUserData) {
+            loadSessionData();
         }
-
-        const savedDepartment = localStorage.getItem('department');
-        // if (savedDepartment) {
-        //     setDepartment(savedDepartment);
-        // }
-
-        // Check if there's an initial message stored
-        const initialMessage = localStorage.getItem(`initialMessage-${sessionId}`);
-        console.log(savedMode)
-        console.log(savedDepartment)
-        console.log(`initialMessage-${sessionId}`)
-        console.log(initialMessage)
-
-        if (initialMessage) {
-            const userMessage: Message = {
-                id: Date.now().toString(),
-                content: initialMessage,
-                type: 'user',
-                timestamp: new Date(),
-            };
-            setMessages([userMessage]);
-            localStorage.removeItem(`initialMessage-${sessionId}`);
-
-            // handleAssistantResponse([userMessage]);
-        } else {
-            // If no initial message, load from DB or start empty
-            // Example: Fetch from your database if needed
-            // setMessages([]) // starting empty for now
-        }
-    }, [sessionId]);
-
+    }, [sessionId, supabase, combinedUserData]);
 
     useEffect(() => {
         if (chatContainerRef.current) {
@@ -160,154 +247,128 @@ export default function Dashboard() {
         }
     }, [messages]);
 
-    const saveCurrentSession = (msgs: Message[]) => {
-        const sessions = JSON.parse(localStorage.getItem('chatSessions') || '[]');
-        const lastMessage = msgs[msgs.length - 1]?.content || 'Empty chat';
+    const saveMessageToDB = async (role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null, function_call?: string | null, function_call_text?: string | null) => {
+        console.log("Save to Supabase", openai_id, content)
+        console.log(sessionData)
+        console.log(combinedUserData)
+        if (!sessionData || !combinedUserData) return;
 
-        const currentSession = {
-            id: currentChatId,
-            messages: msgs,
-            lastMessage,
-            timestamp: new Date(),
-        };
+        // We will "upsert" by openai_id. If openai_id is provided, we try to update; else, insert new.
+        // For simplicity, if no openai_id, we just insert a new row.
+        // If openai_id is present, we first try to select if a record exists with that id.
+        if (openai_id) {
+            const { data: existing } = await supabase
+                .from('chat')
+                .select('chat_id')
+                .eq('openai_id', openai_id)
+                .eq('session_id', sessionData.session_id)
+                .single();
 
-        const updatedSessions = sessions
-            .filter((s: any) => s.id !== currentChatId)
-            .concat([currentSession]);
+            if (existing) {
+                // Update existing record
+                const {error: updateError} = await supabase
+                    .from('chat')
+                    .update({
+                        message: content,
+                        function_call,
+                        function_call_text
+                    })
+                    .eq('chat_id', existing.chat_id);
 
-        localStorage.setItem('chatSessions', JSON.stringify(updatedSessions));
-    };
+                if (updateError) {
+                    console.error('Error updating message:', updateError);
+                }
+                return;
+            }
+        }
 
-    const handleNewChat = () => {
-        const newChatId = Date.now().toString();
-        setCurrentChatId(newChatId);
-        setMessages([]);
-        setInputMessage('');
-        localStorage.setItem('currentChatId', newChatId);
-        // Reset mode states
-        setMode('text');
-        setHasReturnedToTextMode(false);
+        // If no openai_id or no existing record found, insert new
+        const {error: insertError} = await supabase
+            .from('chat')
+            .insert([
+                {
+                    session_id: sessionData.session_id,
+                    user: combinedUserData.id,
+                    role,
+                    message: content,
+                    mode: sessionData.mode,
+                    openai_id: openai_id || null,
+                    function_call: function_call || null,
+                    function_call_text: function_call_text || null
+                }
+            ]);
+
+        if (insertError) console.error('Error saving message:', insertError);
     };
 
     const handleSendMessage = async () => {
-        if (!inputMessage.trim()) return;
+        if (!inputMessage.trim() || !sessionData || sessionData.mode !== 'text') return;
 
-        // Send user message
         const userMessage: Message = {
             id: Date.now().toString(),
             content: inputMessage,
             type: 'user',
-            timestamp: new Date(),
+            created_at: new Date(),
         };
 
         const updatedMessages = [...messages, userMessage];
         setMessages(updatedMessages);
         setInputMessage('');
         setIsProcessing(true);
-        saveCurrentSession(updatedMessages);
 
-        // If in voice mode and connected, send to OpenAI realtime
-        if (mode === 'voice' && isConnected) {
-            clientRef.current.sendUserMessageContent([
-                {type: 'input_text', text: userMessage.content}
-            ]);
-            // The assistant's response will come via conversation.updated event
-            setIsProcessing(false);
-            return;
-        }
+        // Insert user message to DB
+        await saveMessageToDB('user', userMessage.content);
 
-        // If in text mode, use a standard API endpoint (simulate)
-        if (mode === 'text') {
-            try {
-                const response = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({messages: updatedMessages}),
-                });
-
-                if (!response.ok) {
-                    throw new Error('Failed to get response');
-                }
-
-                const data = await response.json();
-                const assistantMessage: Message = {
-                    id: (Date.now() + 1).toString(),
-                    content: data.message,
-                    type: 'assistant',
-                    timestamp: new Date(),
-                };
-
-                const finalMessages = [...updatedMessages, assistantMessage];
-                setMessages(finalMessages);
-                saveCurrentSession(finalMessages);
-            } catch (error) {
-                console.error('Error sending message:', error);
-                const errorMessage: Message = {
-                    id: (Date.now() + 1).toString(),
-                    content: "I apologize, but I'm having trouble responding right now. Please try again.",
-                    type: 'assistant',
-                    timestamp: new Date(),
-                };
-                const finalMessages = [...updatedMessages, errorMessage];
-                setMessages(finalMessages);
-                saveCurrentSession(finalMessages);
-            } finally {
-                setIsProcessing(false);
-            }
-        }
-    };
-
-    const startRecording = async () => {
-        // Start recording (push-to-talk)
-        // If not connected and in voice mode, connect first
-        if (mode === 'voice' && !isConnected) {
-            await connectConversation();
-        }
-
-        setIsRecording(true);
-        const client = clientRef.current;
-        const wavRecorder = wavRecorderRef.current;
-        const wavStreamPlayer = wavStreamPlayerRef.current;
-
-        const trackSampleOffset = await wavStreamPlayer.interrupt();
-        if (trackSampleOffset?.trackId) {
-            const {trackId, offset} = trackSampleOffset;
-            await client.cancelResponse(trackId, offset);
-        }
-
+        // Fetch assistant response
         try {
-            if (!wavRecorder.recording) {
-                await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+            const response = await fetch('http://localhost:11000/complete-query', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    updatedMessages,
+                    department: ["AI"],
+                    access_level: 1
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get assistant response');
             }
-        } catch (e) {
-            console.error('Error starting recorder:', e);
-            setIsRecording(false);
+
+            const data = await response.json();
+            const assistantMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                content: data.message,
+                type: 'assistant',
+                created_at: new Date(),
+            };
+
+            // Insert assistant message into DB
+            await saveMessageToDB('assistant', assistantMessage.content);
+
+            const finalMessages = [...updatedMessages, assistantMessage];
+            setMessages(finalMessages);
+        } catch (error) {
+            console.error('Error sending message:', error);
+            const errorMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                content: "I apologize, but I'm having trouble responding right now. Please try again.",
+                type: 'assistant',
+                created_at: new Date(),
+            };
+            const finalMessages = [...updatedMessages, errorMessage];
+            setMessages(finalMessages);
+            await saveMessageToDB('assistant', errorMessage.content);
+        } finally {
+            setIsProcessing(false);
         }
     };
 
-    const stopRecording = async () => {
-        if (!isRecording) return;
-
-        setIsRecording(false);
-        const client = clientRef.current;
-        const wavRecorder = wavRecorderRef.current;
-
-        if (wavRecorder.recording) {
-            try {
-                await wavRecorder.pause();
-            } catch (e) {
-                console.error('Error pausing recorder:', e);
-            }
-        }
-
-        client.createResponse();
-    };
-
-    const connectConversation = useCallback(async () => {
-        if (isConnected) return;
-
+    // Voice mode methods
+    const connectConversation = useCallback(async (session: SessionData, userData: CombinedUserDataInterface) => {
+        if (isConnected || !session) return;
         const client = clientRef.current;
         const wavRecorder = wavRecorderRef.current;
         const wavStreamPlayer = wavStreamPlayerRef.current;
@@ -321,7 +382,7 @@ export default function Dashboard() {
 
         setIsConnected(true);
 
-        // Add RAG query tool
+        // Add your RAG query tool or other tools if needed.
         client.addTool(
             {
                 name: 'rag_query',
@@ -346,7 +407,7 @@ export default function Dashboard() {
                         },
                         body: JSON.stringify({
                             query,
-                            department: ['AI'],
+                            department: [session.department],
                             access_level: 1
                         })
                     });
@@ -355,7 +416,8 @@ export default function Dashboard() {
                         throw new Error('Failed to get response from RAG system');
                     }
 
-                    return await response.json();
+                    const result = await response.json();
+                    return result;
                 } catch (error) {
                     console.error('Error querying RAG system:', error);
                     return {
@@ -368,47 +430,128 @@ export default function Dashboard() {
 
         client.on('conversation.updated', async ({item, delta}: any) => {
             const clientItems = client.conversation.getItems();
-
             // Convert items to messages
-            const convertedMessages: Message[] = clientItems.map((it: ItemType) => {
-                const role = it.role || (it.type === 'function_call_output' ? 'assistant' : 'system');
-                const content = it.formatted?.transcript || it.formatted?.text || '(no content)';
-                // Treat 'system' and 'function' as 'assistant' for display
-                const msgType: 'assistant' | 'user' = (role === 'assistant' || role === 'function' || role === 'system')
-                    ? 'assistant'
-                    : 'user';
-                return {
+            // We'll use a buffer approach now:
+            const newMessages: Message[] = [];
+
+            for (const it of clientItems) {
+                let role: 'user' | 'assistant' | 'system';
+                let function_call = null;
+                let function_call_text = null;
+                let content = '';
+
+                if (it.type === 'message') {
+                    role = it.role === 'user' ? 'user' : 'assistant';
+                    if (role === 'assistant') {
+                        // For assistant messages, we accumulate transcript from streaming
+                        const transcript = it.content?.find((c: any) => c.type === 'audio')?.transcript || '';
+                        // Update buffer
+                        if (!messageBuffers.current[it.id]) {
+                            messageBuffers.current[it.id] = {
+                                role: 'assistant',
+                                content: transcript,
+                                created_at: new Date(),
+                            };
+                        } else {
+                            // Append new transcript parts
+                            messageBuffers.current[it.id].content = transcript;
+                        }
+                        content = messageBuffers.current[it.id].content;
+                    } else {
+                        // For user messages
+                        const userContent = it.content?.[0]?.text || '(no content)';
+                        // Update buffer
+                        if (!messageBuffers.current[it.id]) {
+                            messageBuffers.current[it.id] = {
+                                role: 'user',
+                                content: userContent,
+                                created_at: new Date(),
+                            };
+                        } else {
+                            messageBuffers.current[it.id].content = userContent;
+                        }
+                        content = messageBuffers.current[it.id].content;
+                    }
+                } else if (it.type === 'function_call') {
+                    role = 'system';
+                    function_call = it.name || null;
+                    function_call_text = it.arguments || '(no arguments)';
+
+                    if (!messageBuffers.current[it.id]) {
+                        messageBuffers.current[it.id] = {
+                            role: 'system',
+                            content: '',
+                            function_call,
+                            function_call_text,
+                            created_at: new Date(),
+                        };
+                    } else {
+                        messageBuffers.current[it.id].function_call = function_call;
+                        messageBuffers.current[it.id].function_call_text = function_call_text;
+                    }
+
+                    content = messageBuffers.current[it.id].content;
+                } else if (it.type === 'function_call_output') {
+                    role = 'system';
+                    function_call_text = it.output || '(no output)';
+
+                    if (!messageBuffers.current[it.id]) {
+                        messageBuffers.current[it.id] = {
+                            role: 'system',
+                            content: '',
+                            function_call_text,
+                            created_at: new Date(),
+                        };
+                    } else {
+                        messageBuffers.current[it.id].function_call_text = function_call_text;
+                    }
+
+                    content = messageBuffers.current[it.id].content;
+                } else {
+                    role = 'system';
+                    content = '(unknown message type)';
+                    if (!messageBuffers.current[it.id]) {
+                        messageBuffers.current[it.id] = {
+                            role: 'system',
+                            content: content,
+                            created_at: new Date(),
+                        };
+                    } else {
+                        messageBuffers.current[it.id].content = content;
+                    }
+                }
+                //
+                // console.log(it.id)
+                // console.log(newMessages)
+                // console.log(messageBuffers.current)
+
+                // Add to the final messages array for rendering
+                newMessages.push({
                     id: it.id,
                     content,
-                    type: msgType,
-                    timestamp: new Date()
-                };
-            });
+                    type: role,
+                    function_call,
+                    function_call_text,
+                    created_at: messageBuffers.current[it.id].created_at
+                });
 
-            setMessages(convertedMessages);
-            saveCurrentSession(convertedMessages);
+                // Upsert into DB
+                await saveMessageToDB(
+                    messageBuffers.current[it.id].role,
+                    messageBuffers.current[it.id].content,
+                    it.id, // use openai_id as it.id
+                    messageBuffers.current[it.id].function_call,
+                    messageBuffers.current[it.id].function_call_text
+                );
+            }
+
+            setMessages(newMessages);
 
             // Handle audio if available
             if (delta?.audio) {
                 wavStreamPlayerRef.current.add16BitPCM(delta.audio, item.id);
             }
-
-            // If item completed with audio, decode
-            if (item.status === 'completed' && item.formatted.audio?.length) {
-                try {
-                    const wavFile = await WavRecorder.decode(item.formatted.audio, 24000, 24000);
-                    item.formatted.file = wavFile;
-                } catch (error) {
-                    console.error('Error decoding audio file:', error);
-                }
-            }
         });
-
-        client.on('realtime.event', (realtimeEvent: any) => {
-            // handle realtime events if needed
-        });
-
-        client.on('error', (event: any) => console.error(event));
 
         client.on('conversation.interrupted', async () => {
             const trackSampleOffset = await wavStreamPlayer.interrupt();
@@ -417,64 +560,66 @@ export default function Dashboard() {
                 await client.cancelResponse(trackId, offset);
             }
         });
-        // Send a welcome message
+
+        client.on('error', (event: any) => console.error(event));
+
+        // If you want to send an initial greeting in voice mode:
         client.sendUserMessageContent([{type: 'input_text', text: 'Hello!'}]);
-    }, [isConnected, instructions]);
 
-    const disconnectConversation = useCallback(async () => {
-        if (!isConnected) return;
+    }, [isConnected, sessionData]);
 
-        setIsConnected(false);
+    const startRecording = async () => {
+        if (mode !== 'voice' || !isConnected) return;
+
+        setIsRecording(true);
         const client = clientRef.current;
-        client.disconnect();
-
         const wavRecorder = wavRecorderRef.current;
-        await wavRecorder.end();
-
         const wavStreamPlayer = wavStreamPlayerRef.current;
-        await wavStreamPlayer.interrupt();
-    }, [isConnected]);
 
-    const switchToVoiceMode = async () => {
-        // Only allow if chat is empty and not returned from voice
-        if (messages.length === 0 && !hasReturnedToTextMode) {
-            await connectConversation();
-            setMode('voice');
+        const trackSampleOffset = await wavStreamPlayer.interrupt();
+        if (trackSampleOffset?.trackId) {
+            const {trackId, offset} = trackSampleOffset;
+            await client.cancelResponse(trackId, offset);
+        }
+
+        if (!wavRecorder.recording) {
+            await wavRecorder.record((data) => client.appendInputAudio(data.mono));
         }
     };
 
-    const cancelVoiceMode = async () => {
-        // Return to text mode and disable future voice mode attempts
-        await disconnectConversation();
-        setMode('text');
-        setHasReturnedToTextMode(true);
+    const stopRecording = async () => {
+        if (!isRecording || mode !== 'voice' || !isConnected) return;
+        setIsRecording(false);
+        const client = clientRef.current;
+        const wavRecorder = wavRecorderRef.current;
+
+        if (wavRecorder.recording) {
+            await wavRecorder.pause();
+        }
+
+        client.createResponse();
     };
 
-    const handleDepartmentSelected = (dept: string) => {
-        localStorage.setItem('department', dept);
-        setDepartment(dept);
-        setShowDepartmentModal(false);
-        // Redirect back to dashboard
+    const handleNewChat = () => {
+        const newChatId = Date.now().toString();
+        setMessages([]);
+        setInputMessage('');
         router.push('/dashboard');
     };
-
-
-    // if (status === 'loading') {
-    //     return (
-    //         <div className="flex items-center justify-center min-h-[calc(100vh-4rem)]">
-    //             <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-    //         </div>
-    //     );
-    // }
 
     return (
         <div className="p-6">
             {showDepartmentModal && (
                 <DepartmentModal
                     onClose={() => setShowDepartmentModal(false)}
-                    onSelect={handleDepartmentSelected}
+                    onSelect={(dept: string) => {
+                        setDepartment(dept);
+                        setShowDepartmentModal(false);
+                        router.push('/dashboard');
+                    }}
                 />
             )}
+
             {/* Welcome Banner */}
             <motion.div
                 initial={{opacity: 0, y: 20}}
@@ -484,12 +629,19 @@ export default function Dashboard() {
                 <div className="flex justify-between items-center">
                     <div>
                         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-                            Welcome back!
+                            Session: {sessionId}
                         </h1>
                         <p className="text-gray-600 dark:text-gray-300">
-                            How can I assist you today?
+                            Mode: {mode} | Department: {department}
                         </p>
                     </div>
+                    <button
+                        onClick={handleNewChat}
+                        className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+                    >
+                        <FiPlus className="w-5 h-5"/>
+                        <span>New Chat</span>
+                    </button>
                 </div>
             </motion.div>
 
@@ -497,18 +649,6 @@ export default function Dashboard() {
             <div className="flex space-x-2">
                 {/* Main Chat Area */}
                 <div className="w-full bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-6">
-                    {/* Chat Header with New Chat Button */}
-                    <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Chat</h2>
-                        <button
-                            onClick={handleNewChat}
-                            className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-                        >
-                            <FiPlus className="w-5 h-5"/>
-                            <span>New Chat</span>
-                        </button>
-                    </div>
-
                     <div
                         ref={chatContainerRef}
                         className="h-[calc(100vh-28rem)] overflow-y-auto mb-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-zinc-600"
@@ -522,12 +662,14 @@ export default function Dashboard() {
                                     className={`max-w-[70%] rounded-lg p-4 ${
                                         message.type === 'user'
                                             ? 'bg-blue-500 text-white'
-                                            : 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
+                                            : message.type === 'assistant'
+                                                ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
+                                                : 'bg-red-100 dark:bg-red-700 text-red-900 dark:red-white'
                                     }`}
                                 >
                                     <p>{message.content}</p>
                                     <p className="text-xs mt-1 opacity-70">
-                                        {new Date(message.timestamp).toLocaleTimeString()}
+                                        {new Date(message.created_at).toLocaleTimeString()}
                                     </p>
                                 </div>
                             </div>
@@ -548,59 +690,40 @@ export default function Dashboard() {
                     </div>
 
                     {/* Controls at bottom */}
-                    <div className="flex items-center space-x-4">
-                        {/* Mode Controls */}
-                        {mode === 'text' ? (
-                            <>
-                                {/* If chat is empty and we haven't returned from voice, show "Switch to Voice Mode" button */}
-                                {!hasReturnedToTextMode && messages.length === 0 && (
-                                    <button
-                                        onClick={switchToVoiceMode}
-                                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
-                                    >
-                                        Switch to Voice Mode
-                                    </button>
-                                )}
-                                {/* Text Input + Send Button */}
-                                <input
-                                    type="text"
-                                    value={inputMessage}
-                                    onChange={(e) => setInputMessage(e.target.value)}
-                                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                                    placeholder="Type your message..."
-                                    className="flex-1 p-4 rounded-xl bg-gray-100 dark:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
-                                />
-                                <button
-                                    onClick={handleSendMessage}
-                                    disabled={!inputMessage.trim()}
-                                    className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                >
-                                    <FiSend size={20}/>
-                                </button>
-                            </>
-                        ) : (
-                            // Voice Mode Controls
-                            <div className="flex items-center space-x-4">
-                                <button
-                                    onMouseDown={startRecording}
-                                    onMouseUp={stopRecording}
-                                    className={`p-2 rounded-full transition-colors ${
-                                        isRecording
-                                            ? 'bg-red-500 hover:bg-red-600 text-white'
-                                            : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
-                                    }`}
-                                >
-                                    {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
-                                </button>
-                                <button
-                                    onClick={cancelVoiceMode}
-                                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
-                                >
-                                    Cancel (Back to Text)
-                                </button>
-                            </div>
-                        )}
-                    </div>
+                    {mode === 'text' ? (
+                        <div className="flex items-center space-x-4">
+                            <input
+                                type="text"
+                                value={inputMessage}
+                                onChange={(e) => setInputMessage(e.target.value)}
+                                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                placeholder="Type your message..."
+                                className="flex-1 p-4 rounded-xl bg-gray-100 dark:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
+                            />
+                            <button
+                                onClick={handleSendMessage}
+                                disabled={!inputMessage.trim()}
+                                className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <FiSend size={20}/>
+                            </button>
+                        </div>
+                    ) : (
+                        // Voice mode controls
+                        <div className="flex items-center space-x-4">
+                            <button
+                                onMouseDown={startRecording}
+                                onMouseUp={stopRecording}
+                                className={`p-2 rounded-full transition-colors ${
+                                    isRecording
+                                        ? 'bg-red-500 hover:bg-red-600 text-white'
+                                        : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
+                                }`}
+                            >
+                                {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
+                            </button>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
