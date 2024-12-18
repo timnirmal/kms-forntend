@@ -1,7 +1,19 @@
 'use client';
 
 import Link from "next/link";
-import {FiHome, FiBell, FiSettings, FiUser, FiLogOut, FiCalendar, FiUpload, FiFolder, FiMessageSquare, FiPieChart} from 'react-icons/fi';
+import {
+    FiHome,
+    FiBell,
+    FiSettings,
+    FiUser,
+    FiLogOut,
+    FiCalendar,
+    FiUpload,
+    FiFolder,
+    FiMessageSquare,
+    FiPieChart,
+    FiDatabase, FiChevronDown, FiChevronRight
+} from 'react-icons/fi';
 import {useEffect, useState} from "react";
 import ThemeToggle from "@/components/ThemeToggle";
 import {signOutAction} from "@/app/actions";
@@ -16,6 +28,7 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
     const [profile, setProfile] = useState(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [isDataIngestionOpen, setIsDataIngestionOpen] = useState(false);
 
     useEffect(() => {
         const fetchUser = async () => {
@@ -52,10 +65,10 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
             <div className="min-h-screen bg-gray-50 dark:bg-zinc-900">
                 {/* Header */}
                 <header className="fixed top-0 left-0 right-0 bg-white dark:bg-zinc-800 shadow-sm z-50">
-                    <div className="flex items-center justify-between px-4 py-3">
+                    <div className="flex items-center justify-between px-4 py-4">
                         <div className="flex items-center space-x-4">
                             <button
-                                // onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
                                 className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700"
                             >
                                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -98,31 +111,74 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
                                 <FiHome className="w-5 h-5"/>
                                 <span>Dashboard</span>
                             </Link>
-                            <Link href="/dashboard/upload"
-                                  className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">
-                                <FiUpload className="w-5 h-5"/>
-                                <span>Upload</span>
-                            </Link>
-                            <Link href="/dashboard/calendar"
-                                  className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">
-                                <FiCalendar className="w-5 h-5"/>
-                                <span>Calendar</span>
-                            </Link>
-                            <Link href="/dashboard/workspaces"
-                                  className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">
-                                <FiFolder className="w-5 h-5"/>
-                                <span>Workspaces</span>
-                            </Link>
-                            <Link href="/dashboard/chat-history"
-                                  className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">
-                                <FiMessageSquare className="w-5 h-5"/>
+                            <Link href="/dashboard/chat-history" className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-gray-200">
+                                <FiMessageSquare className="w-5 h-5" />
                                 <span>Chat History</span>
                             </Link>
-                            <Link href="/dashboard/analytics"
-                                  className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">
-                                <FiPieChart className="w-5 h-5"/>
-                                <span>Analytics</span>
-                            </Link>
+
+                            {/* Data Ingestion Section */}
+                            <div>
+                                <button
+                                    onClick={() => setIsDataIngestionOpen(!isDataIngestionOpen)}
+                                    className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-gray-200"
+                                >
+                                    <div className="flex items-center space-x-3">
+                                        <FiDatabase className="w-5 h-5" />
+                                        <span>Data Ingestion</span>
+                                    </div>
+                                    {isDataIngestionOpen ? (
+                                        <FiChevronDown className="w-4 h-4" />
+                                    ) : (
+                                        <FiChevronRight className="w-4 h-4" />
+                                    )}
+                                </button>
+
+                                {isDataIngestionOpen && (
+                                    <div className="ml-4 mt-2 space-y-2">
+                                        <Link
+                                            href="/dashboard/upload"
+                                            className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-gray-200"
+                                        >
+                                            <FiUpload className="w-5 h-5" />
+                                            <span>Upload Content</span>
+                                        </Link>
+                                        <Link
+                                            href="/dashboard/source-config"
+                                            className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700 text-gray-700 dark:text-gray-200"
+                                        >
+                                            <FiSettings className="w-5 h-5" />
+                                            <span>Source Configuration</span>
+                                        </Link>
+                                    </div>
+                                )}
+                            </div>
+
+
+                            {/*<Link href="/dashboard/upload"*/}
+                            {/*      className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">*/}
+                            {/*    <FiUpload className="w-5 h-5"/>*/}
+                            {/*    <span>Upload</span>*/}
+                            {/*</Link>*/}
+                            {/*<Link href="/dashboard/calendar"*/}
+                            {/*      className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">*/}
+                            {/*    <FiCalendar className="w-5 h-5"/>*/}
+                            {/*    <span>Calendar</span>*/}
+                            {/*</Link>*/}
+                            {/*<Link href="/dashboard/workspaces"*/}
+                            {/*      className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">*/}
+                            {/*    <FiFolder className="w-5 h-5"/>*/}
+                            {/*    <span>Workspaces</span>*/}
+                            {/*</Link>*/}
+                            {/*<Link href="/dashboard/chat-history"*/}
+                            {/*      className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">*/}
+                            {/*    <FiMessageSquare className="w-5 h-5"/>*/}
+                            {/*    <span>Chat History</span>*/}
+                            {/*</Link>*/}
+                            {/*<Link href="/dashboard/analytics"*/}
+                            {/*      className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-700">*/}
+                            {/*    <FiPieChart className="w-5 h-5"/>*/}
+                            {/*    <span>Analytics</span>*/}
+                            {/*</Link>*/}
                         </div>
 
                         {/* Settings section at the bottom */}
@@ -173,7 +229,7 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
 
                 {/* Main Content */}
                 <main
-                    className={`pt-24 ${isSidebarOpen ? 'ml-64 px-12' : 'ml-0'} transition-margin duration-200 ease-in-out`}>
+                    className={`pt-20 ${isSidebarOpen ? 'ml-64 px-1' : 'ml-0'} transition-margin duration-200 ease-in-out`}>
                     {children}
                 </main>
             </div>
