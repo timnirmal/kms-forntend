@@ -3,7 +3,7 @@
 import {useEffect, useRef, useCallback, useState} from 'react';
 import {usePathname, useRouter} from "next/navigation";
 import {motion} from 'framer-motion';
-import {FiSend, FiMic, FiMicOff, FiPlus} from 'react-icons/fi';
+import {FiSend, FiMic, FiMicOff, FiPlus, FiUserPlus} from 'react-icons/fi';
 import {RealtimeClient} from '@openai/realtime-api-beta';
 import {ItemType} from '@openai/realtime-api-beta/dist/lib/client.js';
 import {WavRecorder, WavStreamPlayer} from '@/lib/wavtools/index.js';
@@ -53,6 +53,13 @@ interface CombinedUserDataInterface {
     avatar_url: string | null;
 }
 
+interface Collaborator {
+    user_id: string;
+    username: string;
+    avatar_url: string | null;
+    level: string; // 'read' or 'write'
+}
+
 export default function Dashboard() {
     const supabase = createClient();
     const pathname = usePathname();
@@ -99,6 +106,12 @@ export default function Dashboard() {
         created_at: Date
     }>>({});
 
+    // New states for collaborators and presence
+    const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
+    const [allUsers, setAllUsers] = useState<CombinedUserDataInterface[]>([]); // For adding new collaborators
+    const [showAddUserDropdown, setShowAddUserDropdown] = useState(false);
+    const [onlineUsers, setOnlineUsers] = useState<string[]>([]); // user_ids who are online
+
     useEffect(() => {
         const fetchUserData = async () => {
             try {
@@ -135,6 +148,91 @@ export default function Dashboard() {
         fetchUserData();
     }, [supabase, router]);
 
+    // Fetch all users for adding collaborators
+    useEffect(() => {
+        const loadAllUsers = async () => {
+            const {data, error} = await supabase
+                .from('profiles')
+                .select('*');
+            if (error) {
+                console.error('Error fetching all users:', error);
+            } else {
+                const users = data.map(u => ({
+                    id: u.id,
+                    email: u.email,
+                    username: u.username,
+                    avatar_url: u.avatar_url
+                }));
+                setAllUsers(users);
+            }
+        };
+        loadAllUsers();
+    }, [supabase]);
+
+    async function loadCollaborators(session_id: string) {
+        const {data: colabs, error: colabError} = await supabase
+            .from('colab')
+            .select('user_id, level')
+            .eq('session_id', session_id);
+
+        if (colabError) {
+            console.error('Error fetching collaborators:', colabError);
+            return [];
+        }
+
+        const userIds = colabs.map(c => c.user_id);
+        if (userIds.length === 0) return [];
+
+        const {data: profiles, error: profilesError} = await supabase
+            .from('profiles')
+            .select('id, username, avatar_url')
+            .in('id', userIds);
+
+        if (profilesError) {
+            console.error('Error fetching collaborator profiles:', profilesError);
+            return [];
+        }
+
+        return colabs.map(colab => {
+            const p = profiles.find(p => p.id === colab.user_id);
+            return {
+                user_id: colab.user_id,
+                username: p?.username || 'Unknown',
+                avatar_url: p?.avatar_url || null,
+                level: colab.level
+            };
+        });
+    }
+
+    async function setupPresence(session_id: string, currentUserId: string) {
+        // Presence channel
+        const presenceChannel = supabase.channel(`presence-${session_id}`, {
+            config: {
+                presence: { key: currentUserId }
+            }
+        });
+
+        presenceChannel
+            .on('presence', { event: 'sync' }, () => {
+                const state = presenceChannel.presenceState();
+                // state looks like { user_id: [{...}, {...}] } mapping user_id to presence data
+                const online = Object.keys(state);
+                setOnlineUsers(online);
+            })
+            .on('presence', { event: 'join' }, ({ key }) => {
+                // user with id `key` joined
+            })
+            .on('presence', { event: 'leave' }, ({ key }) => {
+                // user with id `key` left
+            })
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    // Track current user
+                    presenceChannel.track({ user_id: currentUserId, joined_at: new Date().toISOString() });
+                }
+            });
+    }
+
     // Load session info and messages
     useEffect(() => {
 
@@ -159,6 +257,15 @@ export default function Dashboard() {
             setMode(sess.mode);
             setDepartment(sess.department);
 
+            // Load collaborators
+            const loadedCollaborators = await loadCollaborators(sess.session_id);
+            setCollaborators(loadedCollaborators);
+
+            // Presence
+            if (sess.mode === 'text' && combinedUserData) {
+                await setupPresence(sess.session_id, combinedUserData.id);
+            }
+
             // Fetch chat messages
             const {data: chatData, error: chatError} = await supabase
                 .from('chat')
@@ -178,6 +285,7 @@ export default function Dashboard() {
                 function_call: c.function_call || null,
                 function_call_text: c.function_call_text || null,
                 created_at: new Date(c.created_at),
+                user_id: c.user
             }));
 
             setMessages(loadedMessages);
@@ -201,6 +309,7 @@ export default function Dashboard() {
                                         function_call: newRow.function_call || null,
                                         function_call_text: newRow.function_call_text || null,
                                         created_at: new Date(newRow.created_at),
+                                        user_id: newRow.user
                                     };
                                     setMessages(prev => [...prev, newMessage]);
                                     // If assistant message arrives, stop processing
@@ -209,12 +318,14 @@ export default function Dashboard() {
                                     }
                                 }
                             } else if (payload.eventType === 'UPDATE') {
-                                // Update existing message
-                                setMessages(prev => prev.map(m => m.id === newRow.chat_id ? {
-                                    ...m,
+                                const newMessage = {
                                     content: newRow.message,
                                     function_call: newRow.function_call || null,
                                     function_call_text: newRow.function_call_text || null
+                                };
+                                setMessages(prev => prev.map(m => m.id === newRow.chat_id ? {
+                                    ...m,
+                                    ...newMessage
                                 } : m));
                             } else if (payload.eventType === 'DELETE') {
                                 // Remove deleted message
@@ -348,6 +459,26 @@ export default function Dashboard() {
         if (insertError) console.error('Error saving message:', insertError);
     };
 
+    const buildHistoryString = () => {
+        // Take last 10 messages
+        const last10 = messages.slice(-10);
+        // For each message, format as:
+        // user (username): <content>
+        // assistant: <content>
+        // Find user from collaborators
+        return last10.map(m => {
+            let speakerName = 'assistant';
+            if (m.type === 'user') {
+                const userColab = collaborators.find(c => c.user_id === m.user_id);
+                speakerName = userColab ? `user (${userColab.username})` : 'user (unknown)';
+            }
+            if (m.type === 'assistant') {
+                speakerName = 'assistant';
+            }
+            return `${speakerName}: ${m.content}`;
+        }).join('\n');
+    };
+
     const handleSendMessage = async () => {
         if (!inputMessage.trim() || !sessionData || sessionData.mode !== 'text') return;
 
@@ -356,23 +487,31 @@ export default function Dashboard() {
         const userMessageContent = inputMessage.trim();
         setInputMessage('');
 
+        // Save user message
         await saveMessageToDB('user', userMessageContent);
+
+        // Build history if not the first message scenario
+        const userCount = messages.filter(m => m.type === 'user').length;
+        const assistantCount = messages.filter(m => m.type === 'assistant').length;
+        let body: any = {
+            query: userMessageContent,
+            department: [sessionData.department],
+            access_level: 1
+        };
+        if (!(userCount === 0 && assistantCount === 0)) {
+            // Add history
+            body.history = buildHistoryString();
+        }
 
         // Get assistant response
         try {
             const response = await fetch('http://localhost:11000/complete-query', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    query: userMessageContent,
-                    department: [sessionData.department],
-                    access_level: 1
-                })
+                body: JSON.stringify(body)
             });
 
-            if (!response.ok) {
-                throw new Error('Failed to get assistant response');
-            }
+            if (!response.ok) throw new Error('Failed to get assistant response');
 
             const data = await response.json();
             const assistantMessageContent = data.answer;
@@ -404,7 +543,27 @@ export default function Dashboard() {
         }
     };
 
-    // Voice mode methods
+    // Add a collaborator
+    const handleAddCollaborator = async (userId: string) => {
+        if (!sessionData) return;
+
+        const {error} = await supabase
+            .from('colab')
+            .insert([
+                {session_id: sessionData.session_id, user_id: userId, level: 'write'}
+            ]);
+
+        if (error) {
+            console.error('Error adding collaborator:', error);
+        } else {
+            // Reload collaborators
+            const updated = await loadCollaborators(sessionData.session_id);
+            setCollaborators(updated);
+        }
+        setShowAddUserDropdown(false);
+    };
+
+    // Voice mode methods unchanged
     const connectConversation = useCallback(async (session: SessionData, userData: CombinedUserDataInterface) => {
         if (isConnected || !session) return;
         const client = clientRef.current;
@@ -573,7 +732,8 @@ export default function Dashboard() {
                     type: role,
                     function_call,
                     function_call_text,
-                    created_at: messageBuffers.current[it.id].created_at
+                    created_at: messageBuffers.current[it.id].created_at,
+                    user_id: session.user
                 });
 
                 // Upsert into DB
@@ -647,6 +807,8 @@ export default function Dashboard() {
         router.push('/dashboard');
     };
 
+    const availableUsersToAdd = allUsers.filter(u => !collaborators.some(c => c.user_id === u.id && u.id !== combinedUserData?.id));
+
     return (
         <div className="p-6">
             {showDepartmentModal && (
@@ -683,6 +845,55 @@ export default function Dashboard() {
                         <span>New Chat</span>
                     </button>
                 </div>
+                {mode === 'text' && (
+                    <div className="mt-4 flex items-center space-x-2">
+                        {/* Show collaborators */}
+                        {collaborators.map(c => (
+                            <div key={c.user_id} className="relative group">
+                                <img
+                                    src={c.avatar_url || '/default-avatar.png'}
+                                    alt={c.username}
+                                    className="w-8 h-8 rounded-full border border-gray-300 dark:border-zinc-600"
+                                />
+                                {/* Online dot */}
+                                {onlineUsers.includes(c.user_id) && (
+                                    <span className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-white dark:border-zinc-800"></span>
+                                )}
+                                <div className="absolute bottom-full mb-1 left-1/2 transform -translate-x-1/2 px-2 py-1 text-sm bg-black text-white rounded hidden group-hover:block">
+                                    {c.username} ({c.level})
+                                </div>
+                            </div>
+                        ))}
+                        {/* Add collaborator button */}
+                        <div className="relative">
+                            <button
+                                onClick={() => setShowAddUserDropdown(!showAddUserDropdown)}
+                                className="w-8 h-8 rounded-full bg-gray-300 dark:bg-zinc-600 flex items-center justify-center hover:bg-gray-400 transition-colors"
+                            >
+                                <FiUserPlus className="text-white"/>
+                            </button>
+                            {showAddUserDropdown && (
+                                <div className="absolute top-10 left-0 bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-600 rounded shadow-lg p-2 w-48 z-50">
+                                    {availableUsersToAdd.map(u => (
+                                        <div
+                                            key={u.id}
+                                            className="flex items-center space-x-2 p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
+                                            onClick={() => handleAddCollaborator(u.id)}
+                                        >
+                                            <img src={u.avatar_url || '/default-avatar.png'} className="w-6 h-6 rounded-full" alt={u.username}/>
+                                            <span className="text-sm text-gray-700 dark:text-gray-200">{u.username}</span>
+                                        </div>
+                                    ))}
+                                    {availableUsersToAdd.length === 0 && (
+                                        <div className="p-2 text-sm text-gray-500">
+                                            No available users
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
             </motion.div>
 
             {/* Chat Interface */}
