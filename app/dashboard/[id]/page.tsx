@@ -69,6 +69,7 @@ export default function Dashboard() {
     const [isProcessing, setIsProcessing] = useState(false);
 
     const [showDepartmentModal, setShowDepartmentModal] = useState(false);
+    const initialAssistantRequested = useRef(false);
 
     // Assume we have user data similar to dashboard page
     const [combinedUserData, setCombinedUserData] = useState<CombinedUserDataInterface | null>(null);
@@ -139,6 +140,7 @@ export default function Dashboard() {
 
         const loadSessionData = async () => {
             if (!sessionId) return;
+            if (!combinedUserData) return;
 
             // Fetch session info from Supabase
             const {data: sessionRows, error: sessionError} = await supabase
@@ -180,58 +182,97 @@ export default function Dashboard() {
 
             setMessages(loadedMessages);
 
-            // Handle assistant response if needed in text mode
-            if (sess.mode === 'text' && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
-                setIsProcessing(true);
-                console.log(loadedMessages[0].content)
-                try {
-                    const response = await fetch('http://localhost:11000/complete-query', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            query: loadedMessages[0].content,
-                            department: ["AI"],
-                            access_level: 1
-                        })
-                    });
+            // If text mode, subscribe to realtime
+            if (sess.mode === 'text') {
+                const channel = supabase.channel(`session-${sessionId}`)
+                    .on(
+                        'postgres_changes',
+                        {event: '*', schema: 'public', table: 'chat', filter: `session_id=eq.${sessionId}`},
+                        (payload) => {
+                            const newRow = payload.new as ChatRow;
+                            if (payload.eventType === 'INSERT') {
+                                // Add new message if not exists
+                                const exists = messages.some(m => m.id === newRow.chat_id);
+                                if (!exists) {
+                                    const newMessage: Message = {
+                                        id: newRow.chat_id,
+                                        content: newRow.message,
+                                        type: newRow.role === 'user' ? 'user' : (newRow.role === 'assistant' ? 'assistant' : 'system'),
+                                        function_call: newRow.function_call || null,
+                                        function_call_text: newRow.function_call_text || null,
+                                        created_at: new Date(newRow.created_at),
+                                    };
+                                    setMessages(prev => [...prev, newMessage]);
+                                    // If assistant message arrives, stop processing
+                                    if (newMessage.type === 'assistant') {
+                                        setIsProcessing(false);
+                                    }
+                                }
+                            } else if (payload.eventType === 'UPDATE') {
+                                // Update existing message
+                                setMessages(prev => prev.map(m => m.id === newRow.chat_id ? {
+                                    ...m,
+                                    content: newRow.message,
+                                    function_call: newRow.function_call || null,
+                                    function_call_text: newRow.function_call_text || null
+                                } : m));
+                            } else if (payload.eventType === 'DELETE') {
+                                // Remove deleted message
+                                const oldRow = payload.old as ChatRow;
+                                setMessages(prev => prev.filter(m => m.id !== oldRow.chat_id));
+                            }
+                        }
+                    ).subscribe();
 
-                    if (!response.ok) {
-                        throw new Error('Failed to get assistant response');
+                // Check if we need an initial assistant response
+                // If we have exactly one user message and no assistant messages, fetch assistant answer
+                const userCount = loadedMessages.filter(m => m.type === 'user').length;
+                const assistantCount = loadedMessages.filter(m => m.type === 'assistant').length;
+
+                if (!initialAssistantRequested.current && userCount === 1 && assistantCount === 0 && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
+                    initialAssistantRequested.current = true; // Mark as requested
+
+                    // Get assistant response
+                    setIsProcessing(true);
+                    try {
+                        const response = await fetch('http://localhost:11000/complete-query', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json',},
+                            body: JSON.stringify({
+                                query: loadedMessages[0].content,
+                                department: [sess.department],
+                                access_level: 1
+                            })
+                        });
+
+                        if (!response.ok) {
+                            throw new Error('Failed to get assistant response');
+                        }
+
+                        const data = await response.json();
+                        const assistantMessageContent = data.answer;
+
+                        // Insert assistant message into chat table (Realtime will update UI)
+                        const {error: insertError} = await supabase
+                            .from('chat')
+                            .insert([
+                                {
+                                    session_id: sess.session_id,
+                                    user: sess.user,
+                                    role: 'assistant',
+                                    message: assistantMessageContent,
+                                    mode: 'text',
+                                },
+                            ]);
+
+                        if (insertError) {
+                            console.error('Error inserting assistant message:', insertError);
+                            setIsProcessing(false);
+                        }
+                    } catch (error) {
+                        console.error('Error fetching assistant response:', error);
+                        setIsProcessing(false);
                     }
-
-                    const data = await response.json();
-                    const assistantMessageContent = data.answer;
-
-                    // Insert assistant message into chat table
-                    const {error: insertError, data: insertedChat} = await supabase
-                        .from('chat')
-                        .insert([
-                            {
-                                session_id: sess.session_id,
-                                user: sess.user,
-                                role: 'assistant',
-                                message: assistantMessageContent,
-                                mode: 'text',
-                            },
-                        ]);
-
-                    if (insertError) {
-                        console.error('Error inserting assistant message:', insertError);
-                    } else {
-                        const assistantMessage: Message = {
-                            id: insertedChat?.[0].chat_id || Date.now().toString(),
-                            content: assistantMessageContent,
-                            type: 'assistant',
-                            created_at: new Date(),
-                        };
-                        setMessages([...loadedMessages, assistantMessage]);
-                    }
-                } catch (error) {
-                    console.error('Error fetching assistant response:', error);
-                } finally {
-                    setIsProcessing(false);
                 }
             }
 
@@ -310,31 +351,21 @@ export default function Dashboard() {
     const handleSendMessage = async () => {
         if (!inputMessage.trim() || !sessionData || sessionData.mode !== 'text') return;
 
-        const userMessage: Message = {
-            id: Date.now().toString(),
-            content: inputMessage,
-            type: 'user',
-            created_at: new Date(),
-        };
-
-        const updatedMessages = [...messages, userMessage];
-        setMessages(updatedMessages);
-        setInputMessage('');
+        // User message: Insert into DB, rely on realtime to show it
         setIsProcessing(true);
+        const userMessageContent = inputMessage.trim();
+        setInputMessage('');
 
-        // Insert user message to DB
-        await saveMessageToDB('user', userMessage.content);
+        await saveMessageToDB('user', userMessageContent);
 
-        // Fetch assistant response
+        // Get assistant response
         try {
             const response = await fetch('http://localhost:11000/complete-query', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    updatedMessages,
-                    department: ["AI"],
+                    query: userMessageContent,
+                    department: [sessionData.department],
                     access_level: 1
                 })
             });
@@ -344,30 +375,31 @@ export default function Dashboard() {
             }
 
             const data = await response.json();
-            const assistantMessage: Message = {
-                id: (Date.now() + 1).toString(),
-                content: data.message,
-                type: 'assistant',
-                created_at: new Date(),
-            };
+            const assistantMessageContent = data.answer;
 
-            // Insert assistant message into DB
-            await saveMessageToDB('assistant', assistantMessage.content);
+            // Insert assistant message into DB (Realtime shows it)
+            const {error: insertError} = await supabase
+                .from('chat')
+                .insert([
+                    {
+                        session_id: sessionData.session_id,
+                        user: sessionData.user,
+                        role: 'assistant',
+                        message: assistantMessageContent,
+                        mode: 'text',
+                    },
+                ]);
 
-            const finalMessages = [...updatedMessages, assistantMessage];
-            setMessages(finalMessages);
+            if (insertError) {
+                console.error('Error inserting assistant message:', insertError);
+                setIsProcessing(false);
+            }
+
         } catch (error) {
             console.error('Error sending message:', error);
-            const errorMessage: Message = {
-                id: (Date.now() + 1).toString(),
-                content: "I apologize, but I'm having trouble responding right now. Please try again.",
-                type: 'assistant',
-                created_at: new Date(),
-            };
-            const finalMessages = [...updatedMessages, errorMessage];
-            setMessages(finalMessages);
-            await saveMessageToDB('assistant', errorMessage.content);
-        } finally {
+            // Insert error assistant message into DB
+            const errorMsg = "I apologize, but I'm having trouble responding right now. Please try again.";
+            await saveMessageToDB('assistant', errorMsg);
             setIsProcessing(false);
         }
     };
@@ -435,9 +467,12 @@ export default function Dashboard() {
         );
 
         client.on('conversation.updated', async ({item, delta}: any) => {
-            const clientItems = client.conversation.getItems();
+            // const clientItems = client.conversation.getItems();
             // Convert items to messages
             // We'll use a buffer approach now:
+            if (session.mode !== 'voice') return;
+
+            const clientItems = client.conversation.getItems();
             const newMessages: Message[] = [];
 
             for (const it of clientItems) {
@@ -607,7 +642,6 @@ export default function Dashboard() {
     };
 
     const handleNewChat = () => {
-        const newChatId = Date.now().toString();
         setMessages([]);
         setInputMessage('');
         router.push('/dashboard');
