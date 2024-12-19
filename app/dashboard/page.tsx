@@ -154,7 +154,8 @@ export default function DashboardPage() {
             .insert([
                 {
                     session_id: newSessionId,
-                    user_id: combinedUserData.id
+                    user_id: combinedUserData.id,
+                    level: "write"
                 }
             ]);
 

@@ -848,11 +848,6 @@ export default function Dashboard() {
         u.id !== combinedUserData?.id
     );
 
-    // // Render up to 3 collaborators who are online
-    // const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
-    // const displayedOnlineCollaborators = onlineCollaborators.slice(0, 1);
-    // const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
-
     return (
         <div className="flex flex-col overflow-hidden h-[calc(100vh-5rem)] bg-gray-50 dark:bg-zinc-900">
             {/* Top Bar - sticky at top */}
@@ -1232,6 +1227,7 @@ export default function Dashboard() {
                                     onChange={(e) => setCustomMessage(e.target.value)}
                                     className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
                                     placeholder="Write a message to send to these new collaborators..."
+                                    rows={7}
                                 ></textarea>
                             </div>
 
