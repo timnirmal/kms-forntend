@@ -4,6 +4,7 @@ import {useEffect, useRef, useCallback, useState} from 'react';
 import {usePathname, useRouter} from "next/navigation";
 import {motion} from 'framer-motion';
 import {FiSend, FiMic, FiMicOff, FiPlus, FiUserPlus} from 'react-icons/fi';
+import {FiUsers, FiTag} from 'react-icons/fi';
 import {RealtimeClient} from '@openai/realtime-api-beta';
 import {ItemType} from '@openai/realtime-api-beta/dist/lib/client.js';
 import {WavRecorder, WavStreamPlayer} from '@/lib/wavtools/index.js';
@@ -16,7 +17,6 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 
-
 interface Message {
     id: string;
     content: string;
@@ -24,6 +24,7 @@ interface Message {
     function_call?: string | null;
     function_call_text?: string | null;
     created_at: Date;
+    user_id?: string;
 }
 
 interface SessionData {
@@ -65,23 +66,36 @@ export default function Dashboard() {
     const pathname = usePathname();
     const router = useRouter();
 
-    // State derived from session record
+    // States
     const [sessionData, setSessionData] = useState<SessionData | null>(null);
     const [mode, setMode] = useState<'text' | 'voice'>('text');
     const [department, setDepartment] = useState<string | null>(null);
-
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputMessage, setInputMessage] = useState('');
     const [isRecording, setIsRecording] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
-
     const [showDepartmentModal, setShowDepartmentModal] = useState(false);
     const initialAssistantRequested = useRef(false);
-
-    // Assume we have user data similar to dashboard page
     const [combinedUserData, setCombinedUserData] = useState<CombinedUserDataInterface | null>(null);
 
-    // Voice mode related references
+    const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
+    const [allUsers, setAllUsers] = useState<CombinedUserDataInterface[]>([]); // For adding new collaborators
+
+    const [showAddUserDropdown, setShowAddUserDropdown] = useState(false);
+    const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
+
+    // Sidebar for participants
+    const [isParticipantsPanelOpen, setIsParticipantsPanelOpen] = useState(false);
+
+    // Modal for adding multiple collaborators
+    const [showAddCollaboratorsModal, setShowAddCollaboratorsModal] = useState(false);
+    const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<string[]>([]);
+    const [selectedAccessLevel, setSelectedAccessLevel] = useState<'read' | 'write'>('write');
+    const [customMessage, setCustomMessage] = useState('');
+
+    // Mode toggle (fast or pro) - just a placeholder here
+    const [isFastMode, setIsFastMode] = useState(true);
+
     const apiKey = process.env.NEXT_PUBLIC_OPENAI_KEY || '';
     const sessionId = pathname.split('/').pop() || '';
     const wavRecorderRef = useRef<WavRecorder>(new WavRecorder({sampleRate: 24000}));
@@ -93,11 +107,9 @@ export default function Dashboard() {
         })
     );
     const [isConnected, setIsConnected] = useState(false);
-    const connectConversationOnce = useRef(false); // Track whether connectConversation has been called
+    const connectConversationOnce = useRef(false);
 
     const chatContainerRef = useRef<HTMLDivElement>(null);
-
-    // This will hold partial transcripts for each openai_id
     const messageBuffers = useRef<Record<string, {
         role: 'user' | 'assistant' | 'system',
         content: string,
@@ -105,12 +117,6 @@ export default function Dashboard() {
         function_call_text?: string | null,
         created_at: Date
     }>>({});
-
-    // New states for collaborators and presence
-    const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
-    const [allUsers, setAllUsers] = useState<CombinedUserDataInterface[]>([]); // For adding new collaborators
-    const [showAddUserDropdown, setShowAddUserDropdown] = useState(false);
-    const [onlineUsers, setOnlineUsers] = useState<string[]>([]); // user_ids who are online
 
     useEffect(() => {
         const fetchUserData = async () => {
@@ -205,7 +211,6 @@ export default function Dashboard() {
     }
 
     async function setupPresence(session_id: string, currentUserId: string) {
-        // Presence channel
         const presenceChannel = supabase.channel(`presence-${session_id}`, {
             config: {
                 presence: { key: currentUserId }
@@ -215,32 +220,21 @@ export default function Dashboard() {
         presenceChannel
             .on('presence', { event: 'sync' }, () => {
                 const state = presenceChannel.presenceState();
-                // state looks like { user_id: [{...}, {...}] } mapping user_id to presence data
                 const online = Object.keys(state);
                 setOnlineUsers(online);
             })
-            .on('presence', { event: 'join' }, ({ key }) => {
-                // user with id `key` joined
-            })
-            .on('presence', { event: 'leave' }, ({ key }) => {
-                // user with id `key` left
-            })
             .subscribe((status) => {
                 if (status === 'SUBSCRIBED') {
-                    // Track current user
                     presenceChannel.track({ user_id: currentUserId, joined_at: new Date().toISOString() });
                 }
             });
     }
 
-    // Load session info and messages
     useEffect(() => {
-
         const loadSessionData = async () => {
-            if (!sessionId) return;
-            if (!combinedUserData) return;
+            if (!sessionId || !combinedUserData) return;
 
-            // Fetch session info from Supabase
+            // Fetch session info
             const {data: sessionRows, error: sessionError} = await supabase
                 .from('session')
                 .select('*')
@@ -253,15 +247,14 @@ export default function Dashboard() {
             }
 
             const sess = sessionRows as SessionData;
-            setSessionData(sess); // Set session data in state
+            setSessionData(sess);
             setMode(sess.mode);
             setDepartment(sess.department);
 
-            // Load collaborators
             const loadedCollaborators = await loadCollaborators(sess.session_id);
             setCollaborators(loadedCollaborators);
 
-            // Presence
+            // Presence only if text mode
             if (sess.mode === 'text' && combinedUserData) {
                 await setupPresence(sess.session_id, combinedUserData.id);
             }
@@ -290,7 +283,7 @@ export default function Dashboard() {
 
             setMessages(loadedMessages);
 
-            // If text mode, subscribe to realtime
+            // Subscribe to realtime if text mode
             if (sess.mode === 'text') {
                 const channel = supabase.channel(`session-${sessionId}`)
                     .on(
@@ -299,7 +292,6 @@ export default function Dashboard() {
                         (payload) => {
                             const newRow = payload.new as ChatRow;
                             if (payload.eventType === 'INSERT') {
-                                // Add new message if not exists
                                 const exists = messages.some(m => m.id === newRow.chat_id);
                                 if (!exists) {
                                     const newMessage: Message = {
@@ -328,7 +320,6 @@ export default function Dashboard() {
                                     ...newMessage
                                 } : m));
                             } else if (payload.eventType === 'DELETE') {
-                                // Remove deleted message
                                 const oldRow = payload.old as ChatRow;
                                 setMessages(prev => prev.filter(m => m.id !== oldRow.chat_id));
                             }
@@ -336,17 +327,13 @@ export default function Dashboard() {
                     ).subscribe();
 
                 // Check if we need an initial assistant response
-                // If we have exactly one user message and no assistant messages, fetch assistant answer
                 const userCount = loadedMessages.filter(m => m.type === 'user').length;
                 const assistantCount = loadedMessages.filter(m => m.type === 'assistant').length;
 
                 if (!initialAssistantRequested.current && userCount === 1 && assistantCount === 0 && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
-                    initialAssistantRequested.current = true; // Mark as requested
-
-                    // Get assistant response
+                    initialAssistantRequested.current = true;
                     setIsProcessing(true);
                     try {
-                        // Initial Message
                         const response = await fetch('/api/chat', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json',},
@@ -364,7 +351,6 @@ export default function Dashboard() {
                         const data = await response.json();
                         const assistantMessageContent = data.message;
 
-                        // Insert assistant message into chat table (Realtime will update UI)
                         const {error: insertError} = await supabase
                             .from('chat')
                             .insert([
@@ -379,8 +365,8 @@ export default function Dashboard() {
 
                         if (insertError) {
                             console.error('Error inserting assistant message:', insertError);
-                            setIsProcessing(false);
                         }
+                        setIsProcessing(false);
                     } catch (error) {
                         console.error('Error fetching assistant response:', error);
                         setIsProcessing(false);
@@ -388,9 +374,9 @@ export default function Dashboard() {
                 }
             }
 
-            // Handle voice mode initialization
+            // Voice mode initialization
             if (sess.mode === 'voice' && !connectConversationOnce.current && combinedUserData) {
-                connectConversationOnce.current = true; // Ensure connectConversation runs only once
+                connectConversationOnce.current = true;
                 await connectConversation(sess, combinedUserData);
             }
         };
@@ -407,14 +393,7 @@ export default function Dashboard() {
     }, [messages]);
 
     const saveMessageToDB = async (role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null, function_call?: string | null, function_call_text?: string | null) => {
-        console.log("Save to Supabase", openai_id, content)
-        console.log(sessionData)
-        console.log(combinedUserData)
         if (!sessionData || !combinedUserData) return;
-
-        // We will "upsert" by openai_id. If openai_id is provided, we try to update; else, insert new.
-        // For simplicity, if no openai_id, we just insert a new row.
-        // If openai_id is present, we first try to select if a record exists with that id.
         if (openai_id) {
             const { data: existing } = await supabase
                 .from('chat')
@@ -424,7 +403,6 @@ export default function Dashboard() {
                 .single();
 
             if (existing) {
-                // Update existing record
                 const {error: updateError} = await supabase
                     .from('chat')
                     .update({
@@ -441,7 +419,6 @@ export default function Dashboard() {
             }
         }
 
-        // If no openai_id or no existing record found, insert new
         const {error: insertError} = await supabase
             .from('chat')
             .insert([
@@ -461,21 +438,12 @@ export default function Dashboard() {
     };
 
     const buildHistoryString = () => {
-        // Take last 10 messages
         const last10 = messages.slice(-10);
-        // For each message, format as:
-        // user (username): <content>
-        // assistant: <content>
-        // Find user from collaborators
         return last10.map(m => {
-            let speakerName = 'assistant';
+            let speakerName = m.type === 'assistant' ? 'assistant' : 'user (unknown)';
             if (m.type === 'user') {
-                console.log(collaborators)
                 const userColab = collaborators.find(c => c.user_id === m.user_id);
                 speakerName = userColab ? `user (${userColab.username})` : 'user (unknown)';
-            }
-            if (m.type === 'assistant') {
-                speakerName = 'assistant';
             }
             return `${speakerName}: ${m.content}`;
         }).join('\n');
@@ -484,15 +452,12 @@ export default function Dashboard() {
     const handleSendMessage = async () => {
         if (!inputMessage.trim() || !sessionData || sessionData.mode !== 'text') return;
 
-        // User message: Insert into DB, rely on realtime to show it
         setIsProcessing(true);
         const userMessageContent = inputMessage.trim();
         setInputMessage('');
 
-        // Save user message
         await saveMessageToDB('user', userMessageContent);
 
-        // Build history if not the first message scenario
         const userCount = messages.filter(m => m.type === 'user').length;
         const assistantCount = messages.filter(m => m.type === 'assistant').length;
         let body: any = {
@@ -501,13 +466,10 @@ export default function Dashboard() {
             access_level: 1
         };
         if (!(userCount === 0 && assistantCount === 0)) {
-            // Add history
             body.history = buildHistoryString();
         }
 
-        // Get assistant response
         try {
-            // Text Response
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -519,7 +481,6 @@ export default function Dashboard() {
             const data = await response.json();
             const assistantMessageContent = data.message;
 
-            // Insert assistant message into DB (Realtime shows it)
             const {error: insertError} = await supabase
                 .from('chat')
                 .insert([
@@ -534,22 +495,26 @@ export default function Dashboard() {
 
             if (insertError) {
                 console.error('Error inserting assistant message:', insertError);
-                setIsProcessing(false);
             }
+            setIsProcessing(false);
 
         } catch (error) {
             console.error('Error sending message:', error);
-            // Insert error assistant message into DB
             const errorMsg = "I apologize, but I'm having trouble responding right now. Please try again.";
             await saveMessageToDB('assistant', errorMsg);
             setIsProcessing(false);
         }
     };
 
-    // Add a collaborator
+    const handleNewChat = () => {
+        setMessages([]);
+        setInputMessage('');
+        router.push('/dashboard');
+    };
+
+    // Add a single collaborator (legacy)
     const handleAddCollaborator = async (userId: string) => {
         if (!sessionData) return;
-
         const {error} = await supabase
             .from('colab')
             .insert([
@@ -559,14 +524,44 @@ export default function Dashboard() {
         if (error) {
             console.error('Error adding collaborator:', error);
         } else {
-            // Reload collaborators
             const updated = await loadCollaborators(sessionData.session_id);
             setCollaborators(updated);
         }
         setShowAddUserDropdown(false);
     };
 
-    // Voice mode methods unchanged
+    // Add multiple collaborators from modal
+    const handleAddMultipleCollaborators = async () => {
+        if (!sessionData || selectedUsersToAdd.length === 0) return;
+
+        // Insert multiple collaborators
+        const newCols = selectedUsersToAdd.map(userId => ({
+            session_id: sessionData.session_id,
+            user_id: userId,
+            level: selectedAccessLevel
+        }));
+
+        const {error} = await supabase.from('colab').insert(newCols);
+        if (error) {
+            console.error('Error adding collaborators:', error);
+        } else {
+            const updated = await loadCollaborators(sessionData.session_id);
+            setCollaborators(updated);
+
+            // Optionally send notification or handle customMessage, copy link, etc.
+            // copy link
+            const currentUrl = window.location.href;
+            // You might want to copy this to clipboard or handle differently
+            // handle customMessage sending if needed
+
+            setShowAddCollaboratorsModal(false);
+            setSelectedUsersToAdd([]);
+            setSelectedAccessLevel('write');
+            setCustomMessage('');
+        }
+    };
+
+    // Presence & UI methods for voice mode
     const connectConversation = useCallback(async (session: SessionData, userData: CombinedUserDataInterface) => {
         if (isConnected || !session) return;
         const client = clientRef.current;
@@ -582,7 +577,6 @@ export default function Dashboard() {
 
         setIsConnected(true);
 
-        // Add your RAG query tool or other tools if needed.
         client.addTool(
             {
                 name: 'rag_query',
@@ -629,9 +623,6 @@ export default function Dashboard() {
         );
 
         client.on('conversation.updated', async ({item, delta}: any) => {
-            // const clientItems = client.conversation.getItems();
-            // Convert items to messages
-            // We'll use a buffer approach now:
             if (session.mode !== 'voice') return;
 
             const clientItems = client.conversation.getItems();
@@ -645,36 +636,20 @@ export default function Dashboard() {
 
                 if (it.type === 'message') {
                     role = it.role === 'user' ? 'user' : 'assistant';
-                    if (role === 'assistant') {
-                        // For assistant messages, we accumulate transcript from streaming
-                        const transcript = it.content?.find((c: any) => c.type === 'audio')?.transcript || '';
-                        // Update buffer
-                        if (!messageBuffers.current[it.id]) {
-                            messageBuffers.current[it.id] = {
-                                role: 'assistant',
-                                content: transcript,
-                                created_at: new Date(),
-                            };
-                        } else {
-                            // Append new transcript parts
-                            messageBuffers.current[it.id].content = transcript;
-                        }
-                        content = messageBuffers.current[it.id].content;
+                    const transcript = it.role === 'assistant'
+                        ? it.content?.find((c: any) => c.type === 'audio')?.transcript || ''
+                        : it.content?.[0]?.text || '(no content)';
+
+                    if (!messageBuffers.current[it.id]) {
+                        messageBuffers.current[it.id] = {
+                            role,
+                            content: transcript,
+                            created_at: new Date(),
+                        };
                     } else {
-                        // For user messages
-                        const userContent = it.content?.[0]?.text || '(no content)';
-                        // Update buffer
-                        if (!messageBuffers.current[it.id]) {
-                            messageBuffers.current[it.id] = {
-                                role: 'user',
-                                content: userContent,
-                                created_at: new Date(),
-                            };
-                        } else {
-                            messageBuffers.current[it.id].content = userContent;
-                        }
-                        content = messageBuffers.current[it.id].content;
+                        messageBuffers.current[it.id].content = transcript;
                     }
+                    content = messageBuffers.current[it.id].content;
                 } else if (it.type === 'function_call') {
                     role = 'system';
                     function_call = it.name || null;
@@ -682,7 +657,7 @@ export default function Dashboard() {
 
                     if (!messageBuffers.current[it.id]) {
                         messageBuffers.current[it.id] = {
-                            role: 'system',
+                            role,
                             content: '',
                             function_call,
                             function_call_text,
@@ -697,10 +672,9 @@ export default function Dashboard() {
                 } else if (it.type === 'function_call_output') {
                     role = 'system';
                     function_call_text = it.output || '(no output)';
-
                     if (!messageBuffers.current[it.id]) {
                         messageBuffers.current[it.id] = {
-                            role: 'system',
+                            role,
                             content: '',
                             function_call_text,
                             created_at: new Date(),
@@ -708,27 +682,21 @@ export default function Dashboard() {
                     } else {
                         messageBuffers.current[it.id].function_call_text = function_call_text;
                     }
-
                     content = messageBuffers.current[it.id].content;
                 } else {
                     role = 'system';
                     content = '(unknown message type)';
                     if (!messageBuffers.current[it.id]) {
                         messageBuffers.current[it.id] = {
-                            role: 'system',
-                            content: content,
+                            role,
+                            content,
                             created_at: new Date(),
                         };
                     } else {
                         messageBuffers.current[it.id].content = content;
                     }
                 }
-                //
-                // console.log(it.id)
-                // console.log(newMessages)
-                // console.log(messageBuffers.current)
 
-                // Add to the final messages array for rendering
                 newMessages.push({
                     id: it.id,
                     content,
@@ -739,11 +707,10 @@ export default function Dashboard() {
                     user_id: session.user
                 });
 
-                // Upsert into DB
                 await saveMessageToDB(
                     messageBuffers.current[it.id].role,
                     messageBuffers.current[it.id].content,
-                    it.id, // use openai_id as it.id
+                    it.id,
                     messageBuffers.current[it.id].function_call,
                     messageBuffers.current[it.id].function_call_text
                 );
@@ -751,7 +718,6 @@ export default function Dashboard() {
 
             setMessages(newMessages);
 
-            // Handle audio if available
             if (delta?.audio) {
                 wavStreamPlayerRef.current.add16BitPCM(delta.audio, item.id);
             }
@@ -767,9 +733,8 @@ export default function Dashboard() {
 
         client.on('error', (event: any) => console.error(event));
 
-        // If you want to send an initial greeting in voice mode:
+        // initial greet in voice mode if you want
         client.sendUserMessageContent([{type: 'input_text', text: 'Hello!'}]);
-
     }, [isConnected, sessionData]);
 
     const startRecording = async () => {
@@ -804,16 +769,356 @@ export default function Dashboard() {
         client.createResponse();
     };
 
-    const handleNewChat = () => {
-        setMessages([]);
-        setInputMessage('');
-        router.push('/dashboard');
-    };
-
     const availableUsersToAdd = allUsers.filter(u => !collaborators.some(c => c.user_id === u.id && u.id !== combinedUserData?.id));
 
+    const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
+
+    // Render up to 3 collaborators who are online
+    const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
+    const displayedOnlineCollaborators = onlineCollaborators.slice(0, 3);
+    const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
+
     return (
-        <div className="p-6">
+        <div className="flex flex-col h-screen overflow-hidden bg-gray-50 dark:bg-zinc-900">
+            {/* Top Bar */}
+            <div className="h-14 shrink-0 border-b border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
+                <div className="h-full flex items-center justify-between px-4">
+                    {/* Left - participants */}
+                    <div className="flex items-center space-x-2">
+                        {/* Participants indicator */}
+                        <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
+                            className={`p-2 rounded-lg transition-all ${
+                                isParticipantsPanelOpen
+                                    ? 'bg-blue-50 text-blue-500 dark:bg-blue-900/30 dark:text-blue-400'
+                                    : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-zinc-800'
+                            }`}
+                            title="Toggle Participants"
+                        >
+                            <FiUsers className="w-4 h-4" />
+                        </motion.button>
+                        <div className="flex items-center space-x-1 relative">
+                            {displayedOnlineCollaborators.map((c, idx) => (
+                                <div
+                                    key={c.user_id}
+                                    className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
+                                >
+                                    <img
+                                        src={c.avatar_url || '/default-avatar.png'}
+                                        alt={c.username}
+                                        className="w-full h-full rounded-full"
+                                    />
+                                </div>
+                            ))}
+                            {moreCount > 0 && (
+                                <motion.button
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
+                                    className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800 bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-xs font-medium text-gray-600 dark:text-gray-300 relative group"
+                                    title="View more participants"
+                                >
+                                    +{moreCount}
+                                    <div className="absolute top-full mt-1 py-1 px-2 bg-black text-white text-xs rounded-lg opacity-0 group-hover:opacity-100">
+                                        more...
+                                    </div>
+                                </motion.button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right - Department, Mode, New Chat */}
+                    <div className="flex items-center space-x-3">
+                        {department && (
+                            <div className="flex items-center px-2.5 py-1.5 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+                                <FiTag className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 mr-1.5" />
+                                <span className="text-sm text-blue-700 dark:text-blue-300 font-medium">
+                  {department}
+                </span>
+                            </div>
+                        )}
+                        {sessionData && sessionData.mode === 'text' && (
+                            <div className={`flex items-center px-2.5 py-1.5 rounded-lg ${
+                                isFastMode
+                                    ? 'bg-green-50 dark:bg-green-900/30'
+                                    : 'bg-purple-50 dark:bg-purple-900/30'
+                            }`}>
+                <span className={`text-sm font-medium ${
+                    isFastMode
+                        ? 'text-green-700 dark:text-green-300'
+                        : 'text-purple-700 dark:text-purple-300'
+                }`}>
+                  {isFastMode ? 'Fast Mode' : 'Pro Mode'}
+                </span>
+                            </div>
+                        )}
+
+                        <button
+                            onClick={handleNewChat}
+                            className="flex items-center space-x-1 px-2.5 py-1.5 bg-blue-500 hover:bg-blue-600
+                 text-white rounded-lg transition-all shadow-sm"
+                            title="New Chat"
+                        >
+                            <FiPlus className="w-3.5 h-3.5" />
+                            <span className="text-sm">New Chat</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Main Content */}
+            <div className="flex flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
+                {/* Participants Sidebar */}
+                <motion.div
+                    initial={{ width: 0 }}
+                    animate={{
+                        width: isParticipantsPanelOpen ? 320 : 0,
+                        opacity: isParticipantsPanelOpen ? 1 : 0
+                    }}
+                    className="border-r border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50
+               backdrop-blur-lg overflow-hidden"
+                >
+                    {isParticipantsPanelOpen && (
+                        <div className="w-80 p-4 h-full overflow-y-auto">
+                            <div className="flex items-center justify-between mb-4">
+                                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Collaborators</h3>
+                                <button
+                                    onClick={() => setShowAddCollaboratorsModal(true)}
+                                    className="p-2 rounded-full bg-gray-100 dark:bg-zinc-700 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+                                    title="Add Collaborators"
+                                >
+                                    <FiUserPlus className="w-4 h-4"/>
+                                </button>
+                            </div>
+                            <div className="space-y-3">
+                                {collaborators.map(c => {
+                                    const online = onlineUsers.includes(c.user_id);
+                                    return (
+                                        <div key={c.user_id} className="flex items-center space-x-3 p-2 rounded-md bg-white dark:bg-zinc-900 shadow-sm border border-gray-200 dark:border-zinc-700">
+                                            <img
+                                                src={c.avatar_url || '/default-avatar.png'}
+                                                alt={c.username}
+                                                className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
+                                            />
+                                            <div className="flex-1">
+                                                <p className="text-sm text-gray-900 dark:text-white font-semibold">{c.username}</p>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">
+                                                    {c.level} access {online && <span className="text-green-500 ml-1">● online</span>}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </motion.div>
+
+                {/* Messages Area */}
+                <div className="flex-1 flex flex-col min-w-0">
+                    {/* Scrollable messages */}
+                    <div className="flex-1 overflow-y-auto" style={{ height: 'calc(100vh - 8.5rem)' }}>
+                        <div className="max-w-3xl mx-auto p-4 space-y-4" ref={chatContainerRef}>
+                            {messages.length === 0 && !isProcessing ? (
+                                <div className="flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400 h-full pt-10">
+                                    <p className="text-lg font-medium mb-1">No messages yet</p>
+                                    <p className="text-sm">Start a new conversation</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {messages.map((message) => {
+                                        const sender = collaborators.find(c => c.user_id === message.user_id);
+                                        const senderName = sender ? sender.username : (message.type === 'assistant' ? 'Assistant' : 'Unknown');
+                                        const isUser = message.type === 'user';
+                                        return (
+                                            <motion.div
+                                                key={message.id}
+                                                initial={{ opacity: 0, y: 10 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
+                                            >
+                                                <div className={`max-w-[70%] rounded-lg p-4 ${
+                                                    isUser
+                                                        ? 'bg-blue-500 text-white'
+                                                        : message.type === 'assistant'
+                                                            ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
+                                                            : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
+                                                }`}>
+                                                    <div className="prose dark:prose-invert max-w-none whitespace-pre-wrap break-words">
+                                                        <ReactMarkdown>{message.content.replace(/\n{2,}/g, '\n')}</ReactMarkdown>
+                                                    </div>
+                                                    <p className="text-[10px] mt-1 opacity-70">
+                                                        {new Date(message.created_at).toLocaleTimeString()}
+                                                    </p>
+                                                </div>
+                                            </motion.div>
+                                        );
+                                    })}
+                                    {isProcessing && (
+                                        <div className="flex justify-start">
+                                            <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4 flex space-x-2">
+                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
+                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Bottom Bar */}
+                    <div className="shrink-0 border-t border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
+                        <div className="max-w-3xl mx-auto p-4">
+                            <div className="relative">
+                                {mode === 'text' ? (
+                                    <>
+                                        <input
+                                            type="text"
+                                            value={inputMessage}
+                                            onChange={(e) => setInputMessage(e.target.value)}
+                                            onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                            placeholder="Type your message..."
+                                            className="w-full p-3 pr-20 rounded-xl border border-gray-200 dark:border-zinc-700
+                        bg-white dark:bg-zinc-800 text-gray-900 dark:text-white
+                        focus:ring-2 focus:ring-blue-500 shadow-sm text-sm"
+                                        />
+                                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center space-x-1">
+                                            {/* In text mode, mic might be disabled or hidden. We'll show it but disabled */}
+                                            <motion.button
+                                                className="p-1.5 rounded-lg text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                                                title="Voice not available in text mode"
+                                            >
+                                                <FiMic className="w-4 h-4" />
+                                            </motion.button>
+                                            <motion.button
+                                                whileHover={{ scale: 1.05 }}
+                                                whileTap={{ scale: 0.95 }}
+                                                onClick={handleSendMessage}
+                                                disabled={!inputMessage.trim() || isProcessing}
+                                                className="p-1.5 text-blue-500 hover:text-blue-600 disabled:text-gray-400
+                           disabled:hover:text-gray-400"
+                                                title="Send Message"
+                                            >
+                                                <FiSend className="w-4 h-4" />
+                                            </motion.button>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="relative flex items-center space-x-4">
+                                        <button
+                                            onMouseDown={startRecording}
+                                            onMouseUp={stopRecording}
+                                            className={`p-2 rounded-full transition-colors ${
+                                                isRecording
+                                                    ? 'bg-red-500 hover:bg-red-600 text-white'
+                                                    : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
+                                            }`}
+                                        >
+                                            {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Modal for adding multiple collaborators */}
+            {showAddCollaboratorsModal && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <motion.div
+                        initial={{ scale: 0.95, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        className="bg-white dark:bg-zinc-800 rounded-xl p-4 max-w-md w-full shadow-xl"
+                    >
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                                Add Collaborators
+                            </h3>
+                            <button
+                                onClick={() => setShowAddCollaboratorsModal(false)}
+                                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="mb-4">
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Select Users
+                            </label>
+                            <select
+                                multiple
+                                value={selectedUsersToAdd}
+                                onChange={(e) => {
+                                    const opts = Array.from(e.target.selectedOptions).map(o => o.value);
+                                    setSelectedUsersToAdd(opts);
+                                }}
+                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                            >
+                                {availableUsersToAdd.map(u => (
+                                    <option key={u.id} value={u.id}>{u.username}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div className="mb-4">
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Access Level
+                            </label>
+                            <select
+                                value={selectedAccessLevel}
+                                onChange={(e) => setSelectedAccessLevel(e.target.value as 'read' | 'write')}
+                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                            >
+                                <option value="write">Write</option>
+                                <option value="read">Read</option>
+                            </select>
+                        </div>
+
+                        <div className="mb-4">
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                Custom Message (optional)
+                            </label>
+                            <textarea
+                                value={customMessage}
+                                onChange={(e) => setCustomMessage(e.target.value)}
+                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                                placeholder="Write a message to send to these new collaborators..."
+                            ></textarea>
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                            <button
+                                onClick={() => { navigator.clipboard.writeText(currentUrl); }}
+                                className="px-3 py-2 text-sm bg-gray-200 dark:bg-zinc-700 rounded-lg text-gray-700 dark:text-gray-100 hover:bg-gray-300 dark:hover:bg-zinc-600"
+                            >
+                                Copy Link
+                            </button>
+                            <div className="space-x-2">
+                                <button
+                                    onClick={() => setShowAddCollaboratorsModal(false)}
+                                    className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleAddMultipleCollaborators}
+                                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                                >
+                                    Add & Send
+                                </button>
+                            </div>
+                        </div>
+                    </motion.div>
+                </div>
+            )}
+
             {showDepartmentModal && (
                 <DepartmentModal
                     onClose={() => setShowDepartmentModal(false)}
@@ -824,184 +1129,6 @@ export default function Dashboard() {
                     }}
                 />
             )}
-
-            {/* Welcome Banner */}
-            <motion.div
-                initial={{opacity: 0, y: 20}}
-                animate={{opacity: 1, y: 0}}
-                className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-8 mb-6"
-            >
-                <div className="flex justify-between items-center">
-                    <div>
-                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-                            Session: {sessionId}
-                        </h1>
-                        <p className="text-gray-600 dark:text-gray-300">
-                            Mode: {mode} | Department: {department}
-                        </p>
-                    </div>
-                    <button
-                        onClick={handleNewChat}
-                        className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-                    >
-                        <FiPlus className="w-5 h-5"/>
-                        <span>New Chat</span>
-                    </button>
-                </div>
-                {mode === 'text' && (
-                    <div className="mt-4 flex items-center space-x-2">
-                        {/* Show collaborators */}
-                        {collaborators.map(c => (
-                            <div key={c.user_id} className="relative group">
-                                <img
-                                    src={c.avatar_url || '/default-avatar.png'}
-                                    alt={c.username}
-                                    className="w-8 h-8 rounded-full border border-gray-300 dark:border-zinc-600"
-                                />
-                                {/* Online dot */}
-                                {onlineUsers.includes(c.user_id) && (
-                                    <span className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-white dark:border-zinc-800"></span>
-                                )}
-                                <div className="absolute bottom-full mb-1 left-1/2 transform -translate-x-1/2 px-2 py-1 text-sm bg-black text-white rounded hidden group-hover:block">
-                                    {c.username} ({c.level})
-                                </div>
-                            </div>
-                        ))}
-                        {/* Add collaborator button */}
-                        <div className="relative">
-                            <button
-                                onClick={() => setShowAddUserDropdown(!showAddUserDropdown)}
-                                className="w-8 h-8 rounded-full bg-gray-300 dark:bg-zinc-600 flex items-center justify-center hover:bg-gray-400 transition-colors"
-                            >
-                                <FiUserPlus className="text-white"/>
-                            </button>
-                            {showAddUserDropdown && (
-                                <div className="absolute top-10 left-0 bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-600 rounded shadow-lg p-2 w-48 z-50">
-                                    {availableUsersToAdd.map(u => (
-                                        <div
-                                            key={u.id}
-                                            className="flex items-center space-x-2 p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
-                                            onClick={() => handleAddCollaborator(u.id)}
-                                        >
-                                            <img src={u.avatar_url || '/default-avatar.png'} className="w-6 h-6 rounded-full" alt={u.username}/>
-                                            <span className="text-sm text-gray-700 dark:text-gray-200">{u.username}</span>
-                                        </div>
-                                    ))}
-                                    {availableUsersToAdd.length === 0 && (
-                                        <div className="p-2 text-sm text-gray-500">
-                                            No available users
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                )}
-            </motion.div>
-
-            {/* Chat Interface */}
-            <div className="flex space-x-2">
-                {/* Main Chat Area */}
-                <div className="w-full bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-6">
-                    <div
-                        ref={chatContainerRef}
-                        className="h-[calc(100vh-28rem)] overflow-y-auto mb-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-zinc-600"
-                    >
-                        {messages.map((message) => {
-                            const sender = collaborators.find(c => c.user_id === message.user_id);
-                            const senderName = sender ? sender.username : (message.type === 'assistant' ? 'Assistant' : 'Unknown');
-                            const senderAvatar = sender?.avatar_url || (message.type === 'assistant' ? '/assistant-avatar.png' : '/default-avatar.png');
-
-                            return (
-                                <div
-                                    key={message.id}
-                                    className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-                                >
-                                    <div className="flex items-start space-x-2 max-w-[70%]">
-                                        {message.type !== 'user' && (
-                                            <img src='/assistant-avatar.png' className="w-6 h-6 rounded-full" alt="assistant"/>
-                                        )}
-                                        {message.type == 'user' && (
-                                            <img src={senderAvatar} className="w-6 h-6 rounded-full" alt={senderName}/>
-                                        )}
-                                        <div
-                                            className={`flex-1 rounded-lg p-4 ${
-                                                message.type === 'user'
-                                                    ? 'bg-blue-500 text-white'
-                                                    : message.type === 'assistant'
-                                                        ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
-                                                        : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
-                                            }`}
-                                        >
-                                            <div className="flex items-center space-x-2 mb-1">
-                                                <span className="text-xs font-semibold">{message.type === 'assistant' ? 'Assistant' : senderName}</span>
-                                                <span className="text-xs opacity-70">{new Date(message.created_at).toLocaleTimeString()}</span>
-                                            </div>
-                                            <ReactMarkdown
-                                                // remarkPlugins={[remarkGfm]}
-                                                // rehypePlugins={[rehypeHighlight, rehypeRaw]}
-                                                className="prose dark:prose-invert whitespace-pre-wrap break-words"
-                                            >
-                                                {message.content.replace(/\n{2,}/g, '\n')}
-                                                {/*{message.content}*/}
-                                            </ReactMarkdown>
-                                        </div>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                        {isProcessing && (
-                            <div className="flex justify-start">
-                                <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4">
-                                    <div className="flex space-x-2">
-                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
-                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
-                                             style={{ animationDelay: '150ms' }}></div>
-                                        <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
-                                             style={{ animationDelay: '300ms' }}></div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Controls at bottom */}
-                    {mode === 'text' ? (
-                        <div className="flex items-center space-x-4">
-                            <input
-                                type="text"
-                                value={inputMessage}
-                                onChange={(e) => setInputMessage(e.target.value)}
-                                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                                placeholder="Type your message..."
-                                className="flex-1 p-4 rounded-xl bg-gray-100 dark:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
-                            />
-                            <button
-                                onClick={handleSendMessage}
-                                disabled={!inputMessage.trim()}
-                                className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            >
-                                <FiSend size={20}/>
-                            </button>
-                        </div>
-                    ) : (
-                        // Voice mode controls
-                        <div className="flex items-center space-x-4">
-                            <button
-                                onMouseDown={startRecording}
-                                onMouseUp={stopRecording}
-                                className={`p-2 rounded-full transition-colors ${
-                                    isRecording
-                                        ? 'bg-red-500 hover:bg-red-600 text-white'
-                                        : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
-                                }`}
-                            >
-                                {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
-                            </button>
-                        </div>
-                    )}
-                </div>
-            </div>
         </div>
     );
 }
