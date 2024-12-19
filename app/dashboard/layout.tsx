@@ -3,15 +3,15 @@
 import Link from "next/link";
 import {
     FiHome,
-    FiBell,
+    // FiBell,
     FiSettings,
     FiUser,
     FiLogOut,
-    FiCalendar,
+    // FiCalendar,
     FiUpload,
-    FiFolder,
+    // FiFolder,
     FiMessageSquare,
-    FiPieChart,
+    // FiPieChart,
     FiDatabase, FiChevronDown, FiChevronRight
 } from 'react-icons/fi';
 import {useEffect, useState} from "react";
@@ -19,13 +19,43 @@ import ThemeToggle from "@/components/ThemeToggle";
 import {signOutAction} from "@/app/actions";
 import {createClient} from "@/utils/supabase/client";
 import {redirect} from "next/navigation";
+import { Database } from "@/types/types";
+import {Factor, UserAppMetadata, UserIdentity, UserMetadata} from "@supabase/auth-js/src/lib/types";
+
+// Type Aliases for Public and Auth Schemas
+type PublicProfile = Database['public']['Tables']['profiles']['Row'];
+export interface AuthUser {
+    id: string
+    app_metadata: UserAppMetadata
+    user_metadata: UserMetadata
+    aud: string
+    confirmation_sent_at?: string
+    recovery_sent_at?: string
+    email_change_sent_at?: string
+    new_email?: string
+    new_phone?: string
+    invited_at?: string
+    action_link?: string
+    email?: string
+    phone?: string
+    created_at: string
+    confirmed_at?: string
+    email_confirmed_at?: string
+    phone_confirmed_at?: string
+    last_sign_in_at?: string
+    role?: string
+    updated_at?: string
+    identities?: UserIdentity[]
+    is_anonymous?: boolean
+    factors?: Factor[]
+}
 
 
 export default function RootLayout({children,}: { children: React.ReactNode; }) {
     const supabase = createClient();
 
-    const [user, setUser] = useState(null);
-    const [profile, setProfile] = useState(null);
+    const [user, setUser] = useState<AuthUser | null>(null);
+    const [profile, setProfile] = useState<PublicProfile | null>(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isDataIngestionOpen, setIsDataIngestionOpen] = useState(false);
@@ -38,6 +68,7 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
                 return;
             }
 
+            console.log(user)
             setUser(user);
 
             const { data: userProfile, error: profileError } = await supabase
@@ -84,16 +115,18 @@ export default function RootLayout({children,}: { children: React.ReactNode; }) 
                                 <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>
                             </button>
                             <div className="flex items-center space-x-2">
-                                <img
-                                    src='/default-avatar.png'
-                                    alt="Profile"
-                                    width={32}
-                                    height={32}
-                                    className="rounded-full"
-                                />
+                                <Link href="/dashboard/profile">
+                                    <img
+                                        src={profile?.avatar_url || '/default-avatar.png'}
+                                        alt="Profile"
+                                        width={32}
+                                        height={32}
+                                        className="rounded-full cursor-pointer"
+                                    />
+                                </Link>
                                 {/*<span className="font-medium">{user?.name}</span>*/}
                             </div>
-                            <ThemeToggle />
+                            <ThemeToggle/>
                         </div>
                     </div>
                 </header>

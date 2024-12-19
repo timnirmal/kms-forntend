@@ -148,6 +148,21 @@ export default function DashboardPage() {
             return;
         }
 
+        // Insert the initial message into chat table
+        const { error: colabError } = await supabase
+            .from('colab')
+            .insert([
+                {
+                    session_id: newSessionId,
+                    user_id: combinedUserData.id
+                }
+            ]);
+
+        if (colabError) {
+            console.error('Error inserting colab message:', colabError);
+            return;
+        }
+
         // Redirect to /dashboard/[session_id]
         router.push(`/dashboard/${newSessionId}`);
     };

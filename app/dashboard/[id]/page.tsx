@@ -919,6 +919,9 @@ export default function Dashboard() {
                                 >
                                     <div className="flex items-start space-x-2 max-w-[70%]">
                                         {message.type !== 'user' && (
+                                            <img src='/assistant-avatar.png' className="w-6 h-6 rounded-full" alt="assistant"/>
+                                        )}
+                                        {message.type == 'user' && (
                                             <img src={senderAvatar} className="w-6 h-6 rounded-full" alt={senderName}/>
                                         )}
                                         <div
@@ -935,11 +938,12 @@ export default function Dashboard() {
                                                 <span className="text-xs opacity-70">{new Date(message.created_at).toLocaleTimeString()}</span>
                                             </div>
                                             <ReactMarkdown
-                                                remarkPlugins={[remarkGfm]}
-                                                rehypePlugins={[rehypeHighlight, rehypeRaw]}
+                                                // remarkPlugins={[remarkGfm]}
+                                                // rehypePlugins={[rehypeHighlight, rehypeRaw]}
                                                 className="prose dark:prose-invert whitespace-pre-wrap break-words"
                                             >
                                                 {message.content.replace(/\n{2,}/g, '\n')}
+                                                {/*{message.content}*/}
                                             </ReactMarkdown>
                                         </div>
                                     </div>
