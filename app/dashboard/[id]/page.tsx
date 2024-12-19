@@ -3,8 +3,7 @@
 import {useEffect, useRef, useCallback, useState} from 'react';
 import {usePathname, useRouter} from "next/navigation";
 import {motion} from 'framer-motion';
-import {FiSend, FiMic, FiMicOff, FiPlus, FiUserPlus} from 'react-icons/fi';
-import {FiUsers, FiTag} from 'react-icons/fi';
+import {FiSend, FiMic, FiMicOff, FiPlus, FiUserPlus, FiUsers, FiTag, FiX, FiCheck, FiChevronDown} from 'react-icons/fi';
 import {RealtimeClient} from '@openai/realtime-api-beta';
 import {ItemType} from '@openai/realtime-api-beta/dist/lib/client.js';
 import {WavRecorder, WavStreamPlayer} from '@/lib/wavtools/index.js';
@@ -31,7 +30,7 @@ interface SessionData {
     session_id: string;
     user: string;
     mode: 'text' | 'voice';
-    department: string;
+    department: string; //  department id
 }
 
 interface ChatRow {
@@ -59,6 +58,11 @@ interface Collaborator {
     username: string;
     avatar_url: string | null;
     level: string; // 'read' or 'write'
+}
+
+interface Department {
+    id: string;
+    name: string;
 }
 
 export default function Dashboard() {
@@ -89,9 +93,10 @@ export default function Dashboard() {
 
     // Modal for adding multiple collaborators
     const [showAddCollaboratorsModal, setShowAddCollaboratorsModal] = useState(false);
-    const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<string[]>([]);
-    const [selectedAccessLevel, setSelectedAccessLevel] = useState<'read' | 'write'>('write');
+    const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<CombinedUserDataInterface[]>([]);
+    const [accessLevel, setAccessLevel] = useState<'read' | 'write'>('write');
     const [customMessage, setCustomMessage] = useState('');
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
 
     // Mode toggle (fast or pro) - just a placeholder here
     const [isFastMode, setIsFastMode] = useState(true);
@@ -157,19 +162,11 @@ export default function Dashboard() {
     // Fetch all users for adding collaborators
     useEffect(() => {
         const loadAllUsers = async () => {
-            const {data, error} = await supabase
-                .from('profiles')
-                .select('*');
+            const {data, error} = await supabase.from('profiles').select('id,email,username,avatar_url');
             if (error) {
                 console.error('Error fetching all users:', error);
             } else {
-                const users = data.map(u => ({
-                    id: u.id,
-                    email: u.email,
-                    username: u.username,
-                    avatar_url: u.avatar_url
-                }));
-                setAllUsers(users);
+                setAllUsers(data || []);
             }
         };
         loadAllUsers();
@@ -210,22 +207,36 @@ export default function Dashboard() {
         });
     }
 
+    async function loadDepartmentName(deptId: string) {
+        // Fetch department name from department table
+        const {data, error} = await supabase
+            .from('department')
+            .select('name')
+            .eq('id', deptId)
+            .single();
+        if (error) {
+            console.error('Error fetching department name:', error);
+            return null;
+        }
+        return data.name;
+    }
+
     async function setupPresence(session_id: string, currentUserId: string) {
         const presenceChannel = supabase.channel(`presence-${session_id}`, {
             config: {
-                presence: { key: currentUserId }
+                presence: {key: currentUserId}
             }
         });
 
         presenceChannel
-            .on('presence', { event: 'sync' }, () => {
+            .on('presence', {event: 'sync'}, () => {
                 const state = presenceChannel.presenceState();
                 const online = Object.keys(state);
                 setOnlineUsers(online);
             })
             .subscribe((status) => {
                 if (status === 'SUBSCRIBED') {
-                    presenceChannel.track({ user_id: currentUserId, joined_at: new Date().toISOString() });
+                    presenceChannel.track({user_id: currentUserId, joined_at: new Date().toISOString()});
                 }
             });
     }
@@ -249,7 +260,10 @@ export default function Dashboard() {
             const sess = sessionRows as SessionData;
             setSessionData(sess);
             setMode(sess.mode);
-            setDepartment(sess.department);
+
+            // Load department name
+            const name = await loadDepartmentName(sess.department);
+            setDepartment(name || sess.department); // fallback to id if not found
 
             const loadedCollaborators = await loadCollaborators(sess.session_id);
             setCollaborators(loadedCollaborators);
@@ -310,14 +324,14 @@ export default function Dashboard() {
                                     }
                                 }
                             } else if (payload.eventType === 'UPDATE') {
-                                const newMessage = {
+                                const updatedMessage = {
                                     content: newRow.message,
                                     function_call: newRow.function_call || null,
                                     function_call_text: newRow.function_call_text || null
                                 };
                                 setMessages(prev => prev.map(m => m.id === newRow.chat_id ? {
                                     ...m,
-                                    ...newMessage
+                                    ...updatedMessage
                                 } : m));
                             } else if (payload.eventType === 'DELETE') {
                                 const oldRow = payload.old as ChatRow;
@@ -395,7 +409,7 @@ export default function Dashboard() {
     const saveMessageToDB = async (role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null, function_call?: string | null, function_call_text?: string | null) => {
         if (!sessionData || !combinedUserData) return;
         if (openai_id) {
-            const { data: existing } = await supabase
+            const {data: existing} = await supabase
                 .from('chat')
                 .select('chat_id')
                 .eq('openai_id', openai_id)
@@ -533,12 +547,10 @@ export default function Dashboard() {
     // Add multiple collaborators from modal
     const handleAddMultipleCollaborators = async () => {
         if (!sessionData || selectedUsersToAdd.length === 0) return;
-
-        // Insert multiple collaborators
-        const newCols = selectedUsersToAdd.map(userId => ({
+        const newCols = selectedUsersToAdd.map(u => ({
             session_id: sessionData.session_id,
-            user_id: userId,
-            level: selectedAccessLevel
+            user_id: u.id,
+            level: accessLevel
         }));
 
         const {error} = await supabase.from('colab').insert(newCols);
@@ -556,7 +568,7 @@ export default function Dashboard() {
 
             setShowAddCollaboratorsModal(false);
             setSelectedUsersToAdd([]);
-            setSelectedAccessLevel('write');
+            setAccessLevel('write');
             setCustomMessage('');
         }
     };
@@ -737,6 +749,61 @@ export default function Dashboard() {
         client.sendUserMessageContent([{type: 'input_text', text: 'Hello!'}]);
     }, [isConnected, sessionData]);
 
+    // Text mode mic button: record audio, call whisper API, set input message
+    const handleTranscribeAudio = async (audioBlob: Blob) => {
+        // Implement whisper API call
+        // Placeholder simulation
+        const transcription = "Transcribed text from audio";
+        setInputMessage(transcription);
+    };
+
+    const startTextModeRecording = async () => {
+        // Push-to-talk for text mode
+        setIsRecording(true);
+        const wavRecorder = wavRecorderRef.current;
+        if (!wavRecorder.recording) {
+            await wavRecorder.record((data) => {
+                // We'll collect data, and on stop we'll transcribe
+            });
+        }
+    };
+
+    const stopTextModeRecording = async () => {
+        setIsRecording(false);
+        const wavRecorder = wavRecorderRef.current;
+        if (wavRecorder.recording) {
+            const blob = await wavRecorder.stop();
+            if (blob) {
+                await handleTranscribeAudio(blob);
+            }
+        }
+    };
+
+    // Voice mode: add cancel and switch to text mode
+    const handleVoiceCancel = async () => {
+        // Disconnect voice session
+        const client = clientRef.current;
+        await client.disconnect();
+        setIsConnected(false);
+        // Remain in voice mode or do something else?
+    };
+
+    const handleSwitchToTextMode = async () => {
+        // Disconnect voice session and switch to text mode
+        const client = clientRef.current;
+        await client.disconnect();
+        setIsConnected(false);
+        if (sessionData) {
+            // Update session mode to text if needed
+            await supabase
+                .from('session')
+                .update({mode: 'text'})
+                .eq('session_id', sessionData.session_id);
+            setMode('text');
+        }
+    };
+
+
     const startRecording = async () => {
         if (mode !== 'voice' || !isConnected) return;
 
@@ -773,22 +840,31 @@ export default function Dashboard() {
 
     const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
 
-    // Render up to 3 collaborators who are online
-    const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
-    const displayedOnlineCollaborators = onlineCollaborators.slice(0, 3);
-    const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
+    const isCurrentUserOnline = combinedUserData && onlineUsers.includes(combinedUserData.id);
+
+    const availableUsersToPick = allUsers.filter(u =>
+        !collaborators.some(c => c.user_id === u.id) &&
+        !selectedUsersToAdd.some(su => su.id === u.id) &&
+        u.id !== combinedUserData?.id
+    );
+
+    // // Render up to 3 collaborators who are online
+    // const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
+    // const displayedOnlineCollaborators = onlineCollaborators.slice(0, 1);
+    // const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
 
     return (
-        <div className="flex flex-col h-screen overflow-hidden bg-gray-50 dark:bg-zinc-900">
-            {/* Top Bar */}
-            <div className="h-14 shrink-0 border-b border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
-                <div className="h-full flex items-center justify-between px-4">
+        <div className="flex flex-col overflow-hidden h-[calc(100vh-5rem)] bg-gray-50 dark:bg-zinc-900">
+            {/* Top Bar - sticky at top */}
+            <div
+                className="sticky top-0 z-10 shrink-0 border-b border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
+                <div className="h-14 flex items-center justify-between px-4">
                     {/* Left - participants */}
                     <div className="flex items-center space-x-2">
                         {/* Participants indicator */}
                         <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
+                            whileHover={{scale: 1.05}}
+                            whileTap={{scale: 0.95}}
                             onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
                             className={`p-2 rounded-lg transition-all ${
                                 isParticipantsPanelOpen
@@ -797,10 +873,17 @@ export default function Dashboard() {
                             }`}
                             title="Toggle Participants"
                         >
-                            <FiUsers className="w-4 h-4" />
+                            <FiUsers className="w-4 h-4"/>
                         </motion.button>
+            {/* Display up to 3 online collaborators + "more" */}
+            {(() => {
+              const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
+              const displayedOnlineCollaborators = onlineCollaborators.slice(0, 1);
+              const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
+
+              return (
                         <div className="flex items-center space-x-1 relative">
-                            {displayedOnlineCollaborators.map((c, idx) => (
+                  {displayedOnlineCollaborators.map((c) => (
                                 <div
                                     key={c.user_id}
                                     className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
@@ -812,28 +895,31 @@ export default function Dashboard() {
                                     />
                                 </div>
                             ))}
-                            {moreCount > 0 && (
+                  {moreCount > 0 && (
                                 <motion.button
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
+                                    whileHover={{scale: 1.05}}
+                                    whileTap={{scale: 0.95}}
                                     onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
                                     className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800 bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-xs font-medium text-gray-600 dark:text-gray-300 relative group"
                                     title="View more participants"
                                 >
                                     +{moreCount}
-                                    <div className="absolute top-full mt-1 py-1 px-2 bg-black text-white text-xs rounded-lg opacity-0 group-hover:opacity-100">
+                                    <div
+                                        className="absolute top-full mt-1 py-1 px-2 bg-black text-white text-xs rounded-lg opacity-0 group-hover:opacity-100">
                                         more...
                                     </div>
                                 </motion.button>
                             )}
                         </div>
+              );
+            })()}
                     </div>
 
                     {/* Right - Department, Mode, New Chat */}
                     <div className="flex items-center space-x-3">
                         {department && (
                             <div className="flex items-center px-2.5 py-1.5 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
-                                <FiTag className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 mr-1.5" />
+                                <FiTag className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 mr-1.5"/>
                                 <span className="text-sm text-blue-700 dark:text-blue-300 font-medium">
                   {department}
                 </span>
@@ -861,7 +947,7 @@ export default function Dashboard() {
                  text-white rounded-lg transition-all shadow-sm"
                             title="New Chat"
                         >
-                            <FiPlus className="w-3.5 h-3.5" />
+                            <FiPlus className="w-3.5 h-3.5"/>
                             <span className="text-sm">New Chat</span>
                         </button>
                     </div>
@@ -872,7 +958,7 @@ export default function Dashboard() {
             <div className="flex flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
                 {/* Participants Sidebar */}
                 <motion.div
-                    initial={{ width: 0 }}
+                    initial={{width: 0}}
                     animate={{
                         width: isParticipantsPanelOpen ? 320 : 0,
                         opacity: isParticipantsPanelOpen ? 1 : 0
@@ -896,7 +982,8 @@ export default function Dashboard() {
                                 {collaborators.map(c => {
                                     const online = onlineUsers.includes(c.user_id);
                                     return (
-                                        <div key={c.user_id} className="flex items-center space-x-3 p-2 rounded-md bg-white dark:bg-zinc-900 shadow-sm border border-gray-200 dark:border-zinc-700">
+                                        <div key={c.user_id}
+                                             className="flex items-center space-x-3 p-2 rounded-md bg-white dark:bg-zinc-900 shadow-sm border border-gray-200 dark:border-zinc-700">
                                             <img
                                                 src={c.avatar_url || '/default-avatar.png'}
                                                 alt={c.username}
@@ -905,7 +992,8 @@ export default function Dashboard() {
                                             <div className="flex-1">
                                                 <p className="text-sm text-gray-900 dark:text-white font-semibold">{c.username}</p>
                                                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                                                    {c.level} access {online && <span className="text-green-500 ml-1">● online</span>}
+                                                    {c.level} access {online &&
+                                                    <span className="text-green-500 ml-1">● online</span>}
                                                 </p>
                                             </div>
                                         </div>
@@ -919,10 +1007,11 @@ export default function Dashboard() {
                 {/* Messages Area */}
                 <div className="flex-1 flex flex-col min-w-0">
                     {/* Scrollable messages */}
-                    <div className="flex-1 overflow-y-auto" style={{ height: 'calc(100vh - 8.5rem)' }}>
+                    <div className="flex-1 overflow-y-auto" style={{height: 'calc(100vh - 8.5rem)'}}>
                         <div className="max-w-3xl mx-auto p-4 space-y-4" ref={chatContainerRef}>
                             {messages.length === 0 && !isProcessing ? (
-                                <div className="flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400 h-full pt-10">
+                                <div
+                                    className="flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400 h-full pt-10">
                                     <p className="text-lg font-medium mb-1">No messages yet</p>
                                     <p className="text-sm">Start a new conversation</p>
                                 </div>
@@ -935,8 +1024,8 @@ export default function Dashboard() {
                                         return (
                                             <motion.div
                                                 key={message.id}
-                                                initial={{ opacity: 0, y: 10 }}
-                                                animate={{ opacity: 1, y: 0 }}
+                                                initial={{opacity: 0, y: 10}}
+                                                animate={{opacity: 1, y: 0}}
                                                 className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
                                             >
                                                 <div className={`max-w-[70%] rounded-lg p-4 ${
@@ -946,7 +1035,8 @@ export default function Dashboard() {
                                                             ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
                                                             : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
                                                 }`}>
-                                                    <div className="prose dark:prose-invert max-w-none whitespace-pre-wrap break-words">
+                                                    <div
+                                                        className="prose dark:prose-invert max-w-none whitespace-pre-wrap break-words">
                                                         <ReactMarkdown>{message.content.replace(/\n{2,}/g, '\n')}</ReactMarkdown>
                                                     </div>
                                                     <p className="text-[10px] mt-1 opacity-70">
@@ -960,8 +1050,10 @@ export default function Dashboard() {
                                         <div className="flex justify-start">
                                             <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4 flex space-x-2">
                                                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
-                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                                                     style={{animationDelay: '150ms'}}></div>
+                                                <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                                                     style={{animationDelay: '300ms'}}></div>
                                             </div>
                                         </div>
                                     )}
@@ -970,165 +1062,219 @@ export default function Dashboard() {
                         </div>
                     </div>
 
-                    {/* Bottom Bar */}
-                    <div className="shrink-0 border-t border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
+                    {/* Bottom Bar - sticky at bottom */}
+                    <div
+                        className="sticky bottom-0 z-10 shrink-0 border-t border-gray-200 dark:border-zinc-700/50 bg-white/50 dark:bg-zinc-800/50 backdrop-blur-lg">
                         <div className="max-w-3xl mx-auto p-4">
-                            <div className="relative">
-                                {mode === 'text' ? (
-                                    <>
-                                        <input
-                                            type="text"
-                                            value={inputMessage}
-                                            onChange={(e) => setInputMessage(e.target.value)}
-                                            onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                                            placeholder="Type your message..."
-                                            className="w-full p-3 pr-20 rounded-xl border border-gray-200 dark:border-zinc-700
-                        bg-white dark:bg-zinc-800 text-gray-900 dark:text-white
-                        focus:ring-2 focus:ring-blue-500 shadow-sm text-sm"
-                                        />
-                                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center space-x-1">
-                                            {/* In text mode, mic might be disabled or hidden. We'll show it but disabled */}
-                                            <motion.button
-                                                className="p-1.5 rounded-lg text-gray-400 dark:text-gray-500 cursor-not-allowed"
-                                                title="Voice not available in text mode"
-                                            >
-                                                <FiMic className="w-4 h-4" />
-                                            </motion.button>
-                                            <motion.button
-                                                whileHover={{ scale: 1.05 }}
-                                                whileTap={{ scale: 0.95 }}
-                                                onClick={handleSendMessage}
-                                                disabled={!inputMessage.trim() || isProcessing}
-                                                className="p-1.5 text-blue-500 hover:text-blue-600 disabled:text-gray-400
+                            {mode === 'text' ? (
+                                <div className="relative flex items-center space-x-2">
+                                    <input
+                                        type="text"
+                                        value={inputMessage}
+                                        onChange={(e) => setInputMessage(e.target.value)}
+                                        onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                        placeholder="Type your message..."
+                                        className="flex-1 p-3 pr-20 rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 shadow-sm text-sm"
+                                    />
+
+                                    {/* Push-to-talk mic for text mode */}
+                                    <motion.button
+                                        whileHover={{scale: 1.05}}
+                                        whileTap={{scale: 0.95}}
+                                        onMouseDown={startTextModeRecording}
+                                        onMouseUp={stopTextModeRecording}
+                                        className={`p-1.5 rounded-lg transition-colors ${
+                                            isRecording
+                                                ? 'text-red-500 hover:text-red-600 bg-red-50 dark:bg-red-900/30'
+                                                : 'text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-400'
+                                        }`}
+                                        title={isRecording ? 'Stop Recording' : 'Press and Hold to Talk'}
+                                    >
+                                        {isRecording ? <FiMicOff className="w-4 h-4"/> : <FiMic className="w-4 h-4"/>}
+                                    </motion.button>
+                                    <motion.button
+                                        whileHover={{scale: 1.05}}
+                                        whileTap={{scale: 0.95}}
+                                        onClick={handleSendMessage}
+                                        disabled={!inputMessage.trim() || isProcessing}
+                                        className="p-1.5 text-blue-500 hover:text-blue-600 disabled:text-gray-400
                            disabled:hover:text-gray-400"
-                                                title="Send Message"
-                                            >
-                                                <FiSend className="w-4 h-4" />
-                                            </motion.button>
-                                        </div>
-                                    </>
-                                ) : (
-                                    <div className="relative flex items-center space-x-4">
-                                        <button
-                                            onMouseDown={startRecording}
-                                            onMouseUp={stopRecording}
-                                            className={`p-2 rounded-full transition-colors ${
-                                                isRecording
-                                                    ? 'bg-red-500 hover:bg-red-600 text-white'
-                                                    : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
-                                            }`}
-                                        >
-                                            {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
+                                        title="Send Message"
+                                    >
+                                        <FiSend className="w-4 h-4"/>
+                                    </motion.button>
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-center space-x-4">
+                                    <button
+                                        onMouseDown={startRecording}
+                                        onMouseUp={stopRecording}
+                                        className={`p-2 rounded-full transition-colors ${
+                                            isRecording
+                                                ? 'bg-red-500 hover:bg-red-600 text-white'
+                                                : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
+                                        }`}
+                                        title="Hold to speak"
+                                    >
+                                        {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
+                                    </button>
+
+                                    {/* Cancel and Switch to Text Mode Buttons in voice mode */}
+                                    <button
+                                        onClick={handleVoiceCancel}
+                                        className="p-2 text-sm bg-gray-200 dark:bg-zinc-700 rounded-lg hover:bg-gray-300 dark:hover:bg-zinc-600 text-gray-700 dark:text-gray-200"
+                                    >
+                                        Cancel
+                                    </button>
+
+                                    <button
+                                        onClick={handleSwitchToTextMode}
+                                        className="p-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                                    >
+                                        Switch to Text Mode
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
-            </div>
 
-            {/* Modal for adding multiple collaborators */}
-            {showAddCollaboratorsModal && (
-                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-                    <motion.div
-                        initial={{ scale: 0.95, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        className="bg-white dark:bg-zinc-800 rounded-xl p-4 max-w-md w-full shadow-xl"
-                    >
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                                Add Collaborators
-                            </h3>
-                            <button
-                                onClick={() => setShowAddCollaboratorsModal(false)}
-                                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                            >
-                                ✕
-                            </button>
-                        </div>
-
-                        <div className="mb-4">
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                Select Users
-                            </label>
-                            <select
-                                multiple
-                                value={selectedUsersToAdd}
-                                onChange={(e) => {
-                                    const opts = Array.from(e.target.selectedOptions).map(o => o.value);
-                                    setSelectedUsersToAdd(opts);
-                                }}
-                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
-                            >
-                                {availableUsersToAdd.map(u => (
-                                    <option key={u.id} value={u.id}>{u.username}</option>
-                                ))}
-                            </select>
-                        </div>
-
-                        <div className="mb-4">
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                Access Level
-                            </label>
-                            <select
-                                value={selectedAccessLevel}
-                                onChange={(e) => setSelectedAccessLevel(e.target.value as 'read' | 'write')}
-                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
-                            >
-                                <option value="write">Write</option>
-                                <option value="read">Read</option>
-                            </select>
-                        </div>
-
-                        <div className="mb-4">
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                Custom Message (optional)
-                            </label>
-                            <textarea
-                                value={customMessage}
-                                onChange={(e) => setCustomMessage(e.target.value)}
-                                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
-                                placeholder="Write a message to send to these new collaborators..."
-                            ></textarea>
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                            <button
-                                onClick={() => { navigator.clipboard.writeText(currentUrl); }}
-                                className="px-3 py-2 text-sm bg-gray-200 dark:bg-zinc-700 rounded-lg text-gray-700 dark:text-gray-100 hover:bg-gray-300 dark:hover:bg-zinc-600"
-                            >
-                                Copy Link
-                            </button>
-                            <div className="space-x-2">
+                {/* Modal for adding multiple collaborators with tags */}
+                {showAddCollaboratorsModal && (
+                    <div
+                        className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                        <motion.div
+                            initial={{scale: 0.95, opacity: 0}}
+                            animate={{scale: 1, opacity: 1}}
+                            className="bg-white dark:bg-zinc-800 rounded-xl p-4 max-w-md w-full shadow-xl"
+                        >
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                                    Add Collaborators
+                                </h3>
                                 <button
                                     onClick={() => setShowAddCollaboratorsModal(false)}
-                                    className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
+                                    className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
                                 >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={handleAddMultipleCollaborators}
-                                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-                                >
-                                    Add & Send
+                <FiX className="w-5 h-5" />
                                 </button>
                             </div>
-                        </div>
-                    </motion.div>
-                </div>
-            )}
 
-            {showDepartmentModal && (
-                <DepartmentModal
-                    onClose={() => setShowDepartmentModal(false)}
-                    onSelect={(dept: string) => {
-                        setDepartment(dept);
-                        setShowDepartmentModal(false);
-                        router.push('/dashboard');
-                    }}
-                />
-            )}
+                            {/* User selection with tags */}
+            <div className="mb-4 relative">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                Add People
+              </label>
+              <div
+                className="flex flex-wrap items-center border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 p-2 cursor-text"
+                onClick={() => setShowUserDropdown(!showUserDropdown)}
+              >
+                {selectedUsersToAdd.map(u => (
+                  <div key={u.id} className="flex items-center bg-blue-100 text-blue-700 rounded-full px-2 py-1 text-sm mr-2 mb-2">
+                    <img src={u.avatar_url || '/default-avatar.png'} alt={u.username} className="w-4 h-4 rounded-full mr-1"/>
+                    <span>{u.username}</span>
+                    <button onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedUsersToAdd(selectedUsersToAdd.filter(su => su.id !== u.id));
+                    }} className="ml-1 text-blue-700 hover:text-blue-900"><FiX /></button>
+                  </div>
+                ))}
+                {selectedUsersToAdd.length === 0 && (
+                  <span className="text-gray-500 dark:text-gray-400 ml-1">Click to add people...</span>
+                )}
+              </div>
+              {showUserDropdown && (
+                <div className="absolute top-full mt-1 w-full bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-lg shadow-lg max-h-48 overflow-auto z-10">
+                  {availableUsersToPick.length === 0 ? (
+                    <div className="p-2 text-sm text-gray-500 dark:text-gray-300">No users available</div>
+                  ) : (
+                    availableUsersToPick.map(u => (
+                      <div
+                        key={u.id}
+                        className="flex items-center p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
+                        onClick={() => {
+                          setSelectedUsersToAdd([...selectedUsersToAdd, u]);
+                          setShowUserDropdown(false);
+                        }}
+                      >
+                        <img src={u.avatar_url || '/default-avatar.png'} alt={u.username} className="w-6 h-6 rounded-full mr-2"/>
+                        <span className="text-sm text-gray-700 dark:text-gray-200">{u.username}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+                            </div>
+
+            {/* Access level */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                Access Level
+              </label>
+              <select
+                value={accessLevel}
+                onChange={(e) => setAccessLevel(e.target.value as 'read'|'write')}
+                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+              >
+                <option value="write">Write</option>
+                <option value="read">Read</option>
+              </select>
+            </div>
+
+            {/* Custom Message */}
+                            <div className="mb-4">
+                                <label
+                                    className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                Add a message (optional)
+                                </label>
+                                <textarea
+                                    value={customMessage}
+                                    onChange={(e) => setCustomMessage(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                                    placeholder="Write a message to send to these new collaborators..."
+                                ></textarea>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(currentUrl);
+                                    }}
+                                    className="px-3 py-2 text-sm bg-gray-200 dark:bg-zinc-700 rounded-lg text-gray-700 dark:text-gray-100 hover:bg-gray-300 dark:hover:bg-zinc-600"
+                                >
+                                    Copy Link
+                                </button>
+                                <div className="space-x-2">
+                                    <button
+                                        onClick={() => setShowAddCollaboratorsModal(false)}
+                                        className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={handleAddMultipleCollaborators}
+                                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                                    >
+                  Send
+                                    </button>
+                                </div>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
+                {showDepartmentModal && (
+                    <DepartmentModal
+                        onClose={() => setShowDepartmentModal(false)}
+                        onSelect={(dept: string) => {
+                            setDepartment(dept);
+                            setShowDepartmentModal(false);
+                            router.push('/dashboard');
+                        }}
+                    />
+                )}
+            </div>
         </div>
     );
 }
+
