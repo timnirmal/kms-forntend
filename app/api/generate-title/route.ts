@@ -25,8 +25,10 @@ Generate only the title without any additional text or punctuation.`;
 
         const title = completion.choices[0].message.content?.trim() || 'New Chat';
 
+
         // Ensure the title isn't too long or generic
-        const finalTitle = title
+        const cleanedTitle = title.replace(/^["']|["']$/g, ''); // Remove leading/trailing quotes
+        const finalTitle = cleanedTitle
             .split(' ')
             .slice(0, 3)
             .join(' ')

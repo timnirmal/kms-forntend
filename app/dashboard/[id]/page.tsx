@@ -16,6 +16,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 import {useRecordVoice} from "@/hooks/useRecord";
+import MessageToolbar from "@/components/messageToolBar";
 
 interface Message {
     id: string;
@@ -25,14 +26,16 @@ interface Message {
     function_call_text?: string | null;
     created_at: Date;
     user_id?: string;
+    sources?: string[]; // Array of strings for sources
+    image_urls?: string[]; // Array of strings for image URLs
 }
 
 interface SessionData {
     session_id: string;
     user: string;
     mode: 'text' | 'voice';
-    department: string; //  department id
-    model: 'fast' | 'pro'
+    department: string; // department ID
+    model: 'fast' | 'pro';
 }
 
 interface ChatRow {
@@ -46,6 +49,8 @@ interface ChatRow {
     function_call?: string | null;
     function_call_text?: string | null;
     openai_id?: string | null;
+    sources?: string[]; // Array of strings for sources
+    image_urls?: string[]; // Array of strings for image URLs
 }
 
 interface CombinedUserDataInterface {
@@ -370,21 +375,52 @@ export default function Dashboard() {
 
                         const data = await response.json();
                         const assistantMessageContent = data.message;
+                        const assistantSources = data.sources || null;
+                        const assistantImages = data.imageUrls || null;
 
                         const {error: insertError} = await supabase
                             .from('chat')
                             .insert([
                                 {
-                                    session_id: sess.session_id,
-                                    user: sess.user,
+                                    session_id: sessionId,
+                                    user: combinedUserData.id,
                                     role: 'assistant',
                                     message: assistantMessageContent,
                                     mode: 'text',
+                                    sources: assistantSources,
+                                    image_urls: assistantImages
                                 },
                             ]);
 
                         if (insertError) {
                             console.error('Error inserting assistant message:', insertError);
+                        } else {
+                            // Title generation after assistant message
+                            const titleResponse = await fetch('/api/generate-title', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    messages: [
+                                        loadedMessages[0].content, // User's first message
+                                        assistantMessageContent   // Assistant's response
+                                    ]
+                                })
+                            });
+
+                            if (titleResponse.ok) {
+                                const {title} = await titleResponse.json();
+                                const {error: titleUpdateError} = await supabase
+                                    .from('session')
+                                    .update({title})
+                                    .eq('session_id', sessionId);
+
+                                if (titleUpdateError) {
+                                    console.error('Error updating session title:', titleUpdateError);
+                                } else {
+                                    setSessionData(prev => prev ? {...prev, title} : prev);
+                                }
+                            }
+
                         }
                         setIsProcessing(false);
                     } catch (error) {
@@ -434,7 +470,7 @@ export default function Dashboard() {
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(body),
                 });
 
@@ -442,9 +478,11 @@ export default function Dashboard() {
 
                 const data = await response.json();
                 const assistantMessageContent = data.message;
+                const assistantSources = data.sources || null;
+                const assistantImages = data.imageUrls || null;
 
                 // Save assistant response in the database
-                await saveMessageToDB('assistant', assistantMessageContent);
+                await saveMessageToDB('assistant', assistantMessageContent, undefined, null, null, assistantSources, assistantImages);
 
                 setIsProcessing(false);
             } catch (error) {
@@ -471,7 +509,8 @@ export default function Dashboard() {
 
     const saveMessageToDB = async (
         role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null,
-        function_call?: string | null, function_call_text?: string | null
+        function_call?: string | null, function_call_text?: string | null,
+        sources?: string[] | null, image_urls?: string[] | null
     ) => {
         if (!sessionData || !combinedUserData) return;
         if (openai_id) {
@@ -488,7 +527,9 @@ export default function Dashboard() {
                     .update({
                         message: content,
                         function_call,
-                        function_call_text
+                        function_call_text,
+                        sources: sources || null,
+                        image_urls: image_urls || null
                     })
                     .eq('chat_id', existing.chat_id);
 
@@ -510,7 +551,9 @@ export default function Dashboard() {
                     mode: sessionData.mode,
                     openai_id: openai_id || null,
                     function_call: function_call || null,
-                    function_call_text: function_call_text || null
+                    function_call_text: function_call_text || null,
+                    sources: sources || null,
+                    image_urls: image_urls || null
                 }
             ]);
 
@@ -561,6 +604,8 @@ export default function Dashboard() {
 
             const data = await response.json();
             const assistantMessageContent = data.message;
+            const assistantSources = data.sources || null;
+            const assistantImages = data.imageUrls || null;
 
             const {error: insertError} = await supabase
                 .from('chat')
@@ -571,6 +616,8 @@ export default function Dashboard() {
                         role: 'assistant',
                         message: assistantMessageContent,
                         mode: 'text',
+                        sources: assistantSources,
+                        image_urls: assistantImages
                     },
                 ]);
 
@@ -670,6 +717,7 @@ export default function Dashboard() {
 
         client.updateSession({instructions: instructions});
         client.updateSession({input_audio_transcription: {model: 'whisper-1'}});
+        client.updateSession({voice: "alloy"});
 
         setIsConnected(true);
 
@@ -724,6 +772,8 @@ export default function Dashboard() {
             const clientItems = client.conversation.getItems();
             const newMessages: Message[] = [];
 
+            // console.log(clientItems)
+
             for (const it of clientItems) {
                 let role: 'user' | 'assistant' | 'system';
                 let function_call = null;
@@ -732,9 +782,10 @@ export default function Dashboard() {
 
                 if (it.type === 'message') {
                     role = it.role === 'user' ? 'user' : 'assistant';
+                    console.log(it.content?.[0])
                     const transcript = it.role === 'assistant'
-                        ? it.content?.find((c: any) => c.type === 'audio')?.transcript || ''
-                        : it.content?.[0]?.text || '(no content)';
+                        ? it.content?.[0]?.transcript || it.content?.[0]?.text || ''
+                        : it.content?.[0]?.transcript || it.content?.[0]?.text || '';
 
                     if (!messageBuffers.current[it.id]) {
                         messageBuffers.current[it.id] = {
@@ -1154,35 +1205,91 @@ export default function Dashboard() {
                                 </div>
                             ) : (
                                 <div className="space-y-3">
-                                    {messages.map((message) => {
-                                        const sender = collaborators.find(c => c.user_id === message.user_id);
-                                        const senderName = sender ? sender.username : (message.type === 'assistant' ? 'Assistant' : 'Unknown');
-                                        const isUser = message.type === 'user';
-                                        return (
-                                            <motion.div
-                                                key={message.id}
-                                                initial={{opacity: 0, y: 10}}
-                                                animate={{opacity: 1, y: 0}}
-                                                className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
-                                            >
-                                                <div className={`max-w-[70%] rounded-lg p-4 ${
-                                                    isUser
-                                                        ? 'bg-blue-500 text-white'
-                                                        : message.type === 'assistant'
-                                                            ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
-                                                            : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
-                                                }`}>
+                                    {messages
+                                        .filter((message) => message.type !== 'system') // Exclude 'system' messages
+                                        .map((message) => {
+                                            const sender = collaborators.find(c => c.user_id === message.user_id);
+                                            const isUser = message.type === 'user';
+
+                                            const displayName = message.type === 'assistant' ? 'Assistant' : (sender ? sender.username : 'timnirmal');
+                                            const avatarUrl = message.type === 'assistant' ? '/assistant-avatar.png' : (sender?.avatar_url || '/default-avatar.png');
+
+                                            return (
+                                                <motion.div
+                                                    key={message.id}
+                                                    initial={{opacity: 0, y: 10}}
+                                                    animate={{opacity: 1, y: 0}}
+                                                    className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+                                                >
+                                                    {/* Avatar and Name */}
                                                     <div
-                                                        className="prose dark:prose-invert max-w-none whitespace-pre-wrap break-words">
-                                                        <ReactMarkdown>{message.content.replace(/\n{2,}/g, '\n')}</ReactMarkdown>
+                                                        className={`flex items-center mb-1 ${isUser ? 'flex-row-reverse space-x-reverse space-x-2' : 'space-x-2'}`}>
+                                                        <img src={avatarUrl} alt={displayName}
+                                                             className="w-8 h-8 rounded-full"/>
+                                                        <span
+                                                            className="text-sm text-gray-700 dark:text-white font-semibold">{displayName}</span>
                                                     </div>
-                                                    <p className="text-[10px] mt-1 opacity-70">
-                                                        {new Date(message.created_at).toLocaleTimeString()}
-                                                    </p>
-                                                </div>
-                                            </motion.div>
-                                        );
-                                    })}
+
+                                                    {/* Message Bubble */}
+                                                    <div className={`relative max-w-[70%] rounded-lg p-4 ${
+                                                        isUser
+                                                            ? 'bg-blue-500 text-white'
+                                                            : message.type === 'assistant'
+                                                                ? 'bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white'
+                                                                : 'bg-red-100 dark:bg-red-700 text-red-900 dark:text-white'
+                                                    }`}>
+                                                        <div
+                                                            className="prose dark:prose-invert max-w-none whitespace-pre-wrap break-words">
+                                                            <ReactMarkdown
+                                                                remarkPlugins={[remarkGfm]}
+                                                                rehypePlugins={[rehypeHighlight, rehypeRaw]}
+                                                            >
+                                                                {message.content.trim()}
+                                                            </ReactMarkdown>
+                                                        </div>
+
+                                                        {/* Display sources if available */}
+                                                        {message.sources && message.sources.length > 0 && (
+                                                            <div className="mt-2">
+                                                                <h4 className="text-xs uppercase font-semibold text-gray-500 dark:text-gray-400 mb-1">Sources:</h4>
+                                                                <ul className="list-disc list-inside text-sm text-gray-600 dark:text-gray-300">
+                                                                    {message.sources.map((src, i) => (
+                                                                        <li key={i}><a href={`#`}
+                                                                                       className="text-blue-600 dark:text-blue-400 underline">{src}</a>
+                                                                        </li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Display images if available */}
+                                                        {message.image_urls && message.image_urls.length > 0 && (
+                                                            <div className="mt-2 grid grid-cols-2 gap-2">
+                                                                {message.image_urls.map((imgUrl, i) => (
+                                                                    <div key={i}
+                                                                         className="w-full rounded overflow-hidden border dark:border-zinc-600">
+                                                                        <img src={imgUrl} alt={`Image ${i + 1}`}
+                                                                             className="object-cover w-full h-auto"/>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+
+                                                        <p className="text-[10px] mt-1 opacity-70 text-right">
+                                                            {new Date(message.created_at).toLocaleTimeString()}
+                                                        </p>
+                                                    </div>
+
+                                                    {/* Toolbar */}
+                                                    <MessageToolbar
+                                                        message={message}
+                                                        sessionId={sessionData?.session_id}
+                                                        userId={combinedUserData?.id}
+                                                    />
+                                                </motion.div>
+                                            );
+                                        })}
+
                                     {isProcessing && (
                                         <div className="flex justify-start">
                                             <div className="bg-gray-100 dark:bg-zinc-700 rounded-lg p-4 flex space-x-2">
@@ -1264,12 +1371,12 @@ export default function Dashboard() {
                                         Cancel
                                     </button>
 
-                                    <button
-                                        onClick={handleSwitchToTextMode}
-                                        className="p-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600"
-                                    >
-                                        Switch to Text Mode
-                                    </button>
+                                    {/*<button*/}
+                                    {/*    onClick={handleSwitchToTextMode}*/}
+                                    {/*    className="p-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600"*/}
+                                    {/*>*/}
+                                    {/*    Switch to Text Mode*/}
+                                    {/*</button>*/}
                                 </div>
                             )}
                         </div>

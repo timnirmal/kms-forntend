@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { motion, AnimatePresence } from 'framer-motion';
-import { FiMessageSquare, FiTrash2, FiClock, FiArrowRight, FiX, FiTag, FiFilter } from 'react-icons/fi';
-import { Database } from '@/types/types';
-import {createClient} from "@/utils/supabase/client"; // Your generated types from Supabase
-// import { generateSummary } from '@/utils/openai'; // A utility function you'll implement for openAI summary generation
+import {useState, useEffect} from 'react';
+import {useRouter} from 'next/navigation';
+import {motion, AnimatePresence} from 'framer-motion';
+import {FiMessageSquare, FiTrash2, FiClock, FiArrowRight, FiX, FiTag, FiFilter, FiEye} from 'react-icons/fi';
+import {Database} from '@/types/types';
+import {createClient} from "@/utils/supabase/client";
+import ReactMarkdown from "react-markdown";
 
 type Session = Database['public']['Tables']['session']['Row'];
 type Chat = Database['public']['Tables']['chat']['Row'];
@@ -27,21 +27,24 @@ export default function ChatHistory() {
     const [departments, setDepartments] = useState<Department[]>([]);
     const [selectedDepartment, setSelectedDepartment] = useState<string>('all');
     const [loadingMessages, setLoadingMessages] = useState(false);
+    const [summaryModalSession, setSummaryModalSession] = useState<Session | null>(null); // For summary view modal
+
+    // Add new state variable for loading summary and API response
+    const [loadingSummary, setLoadingSummary] = useState(false);
+    const [sessionSummary, setSessionSummary] = useState<string | null>(null);
+
     const router = useRouter();
 
     // Fetch departments
     useEffect(() => {
         const fetchDepartments = async () => {
-            const { data, error } = await supabase
+            const {data, error} = await supabase
                 .from('department')
                 .select('*');
             if (error) {
                 console.error('Error fetching departments:', error);
             } else if (data && data.length > 0) {
                 setDepartments(data);
-                // If none selected, pick 'all' by default
-                // If you want to default to first department, uncomment:
-                // setSelectedDepartment(data[0].department_id);
             }
         };
         fetchDepartments();
@@ -50,10 +53,10 @@ export default function ChatHistory() {
     // Fetch all sessions
     useEffect(() => {
         const fetchSessions = async () => {
-            const { data, error } = await supabase
+            const {data, error} = await supabase
                 .from('session')
                 .select('*')
-                .order('created_at', { ascending: false });
+                .order('created_at', {ascending: false});
             if (error) {
                 console.error('Error fetching sessions:', error);
             } else {
@@ -66,13 +69,12 @@ export default function ChatHistory() {
         const channel = supabase.channel('public:session')
             .on(
                 'postgres_changes',
-                { event: '*', schema: 'public', table: 'session' },
-                async (payload) => {
-                    // Re-fetch sessions on any change
-                    const { data, error } = await supabase
+                {event: '*', schema: 'public', table: 'session'},
+                async () => {
+                    const {data, error} = await supabase
                         .from('session')
                         .select('*')
-                        .order('created_at', { ascending: false });
+                        .order('created_at', {ascending: false});
                     if (!error) {
                         setSessions(data || []);
                     }
@@ -92,7 +94,7 @@ export default function ChatHistory() {
 
     const handleDeleteChat = async (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
-        const { error } = await supabase
+        const {error} = await supabase
             .from('session')
             .delete()
             .eq('session_id', sessionId);
@@ -100,13 +102,11 @@ export default function ChatHistory() {
             console.error('Error deleting session:', error);
         } else {
             setSelectedSession(null);
-            // Sessions will refresh via Realtime subscription
         }
     };
 
     const handleContinueChat = (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
-        // Store current session_id or handle navigation logic as needed
         localStorage.setItem('currentChatId', sessionId);
         router.push(`/dashboard/${sessionId}`);
     };
@@ -114,11 +114,11 @@ export default function ChatHistory() {
     const handleViewChat = async (session: Session) => {
         setSelectedSession(session);
         setLoadingMessages(true);
-        const { data: chats, error } = await supabase
+        const {data: chats, error} = await supabase
             .from('chat')
             .select('*')
             .eq('session_id', session.session_id)
-            .order('created_at', { ascending: true });
+            .order('created_at', {ascending: true});
 
         if (error) {
             console.error('Error fetching chat messages:', error);
@@ -137,46 +137,89 @@ export default function ChatHistory() {
 
         setSessionMessages(filteredMessages);
         setLoadingMessages(false);
-
-        // Check summary status
-        await ensureSummaryIsUpToDate(session);
     };
 
-    async function ensureSummaryIsUpToDate(session: Session) {
-        // If session.summery_date is older than last message date or summary is missing, regenerate
-        const lastMessage = sessionMessages[sessionMessages.length - 1];
-        const lastMessageTime = lastMessage ? lastMessage.timestamp : null;
+    // Function to load summary when modal opens
+    const handleViewSummary = async (session: Session) => {
+        setSummaryModalSession(session); // Open the modal
+        setLoadingSummary(true); // Start loading
+        setSessionSummary(null); // Reset the previous summary
 
-        const summaryNeeded =
-            !session.summery ||
-            !session.summery_date ||
-            (lastMessageTime && new Date(session.summery_date) < lastMessageTime);
+        try {
+            // Fetch session messages to send to the API
+            const {data: chats, error} = await supabase
+                .from('chat')
+                .select('*')
+                .eq('session_id', session.session_id)
+                .order('created_at', {ascending: true});
 
-        if (summaryNeeded && selectedSession) {
-            // Generate summary using OpenAI (implement generateSummary separately)
-            // const summary = await generateSummary(sessionMessages);
-            const summary = "hihishdisd"
-            const { error } = await supabase
-                .from('session')
-                .update({
-                    summery: summary,
-                    summery_date: new Date().toISOString()
-                })
-                .eq('session_id', selectedSession.session_id);
             if (error) {
-                console.error('Error updating summary:', error);
-            } else {
-                // Update local session state
-                setSelectedSession((prev) => prev ? { ...prev, summery: summary, summery_date: new Date().toISOString() } : prev);
+                throw new Error('Failed to fetch chat messages');
             }
+
+            const messages = (chats || []).map((msg) => ({
+                id: msg.chat_id,
+                content: msg.message,
+                role: msg.role,
+                timestamp: msg.created_at,
+            }));
+
+            console.log(messages)
+
+            // Call the API to generate the summary
+            const response = await fetch('/api/summery', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({messages}),
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch session summary');
+            }
+
+            const data = await response.json();
+            console.log(data)
+            setSessionSummary(data.summery || 'No summary available');
+        } catch (error) {
+            console.error('Error fetching session summary:', error);
+            setSessionSummary('Failed to load summary.');
+        } finally {
+            setLoadingSummary(false); // Stop loading
         }
-    }
+    };
+
+    // Helper to get last message excerpt if no summary is available
+    const getLastMessageExcerpt = (session: Session): string => {
+        // Find the last message of the session from sessions or from previously stored state
+        // Since we have all sessions, we can do a quick fetch:
+        // For performance you might want to store last msg excerpt in session table
+        // Here, just find the last user or assistant message from sessionMessages if it's the currently selected session
+        // If not selected, do a quick fetch:
+
+        const sessionId = session.session_id;
+        // If we have selectedSession and it matches sessionId, use sessionMessages directly
+        if (selectedSession?.session_id === sessionId && sessionMessages.length > 0) {
+            const lastMsg = sessionMessages[sessionMessages.length - 1];
+            return truncateString(lastMsg.content, 100);
+        } else {
+            // If not selected, we do a quick fetch of last message synchronously (not ideal)
+            // For simplicity, assume sessions are frequently updated and you won't need a separate fetch here.
+            // You could do a separate minimal fetch for the last message:
+            // Since user asked for code changes only, we do a synchronous approach:
+            // Return a placeholder if we cannot load messages right now.
+            return 'No messages...';
+        }
+    };
+
+    const truncateString = (str: string, maxLength: number) => {
+        return str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
+    };
 
     return (
         <div className="p-6">
             <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
+                initial={{opacity: 0, y: 20}}
+                animate={{opacity: 1, y: 0}}
                 className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-8 mb-6"
             >
                 <div className="flex justify-between items-start">
@@ -189,7 +232,7 @@ export default function ChatHistory() {
                         </p>
                     </div>
                     <div className="flex items-center space-x-2">
-                        <FiFilter className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+                        <FiFilter className="w-5 h-5 text-gray-500 dark:text-gray-400"/>
                         <select
                             value={selectedDepartment}
                             onChange={(e) => setSelectedDepartment(e.target.value)}
@@ -211,28 +254,29 @@ export default function ChatHistory() {
                     filteredSessions.map((session) => (
                         <motion.div
                             key={session.session_id}
-                            initial={{ opacity: 0, y: 20 }}
-                            animate={{ opacity: 1, y: 0 }}
+                            initial={{opacity: 0, y: 20}}
+                            animate={{opacity: 1, y: 0}}
                             onClick={() => handleViewChat(session)}
                             className="bg-white dark:bg-zinc-800 rounded-xl shadow-md p-6 hover:shadow-lg transition-shadow cursor-pointer"
                         >
                             <div className="flex items-start justify-between">
                                 <div className="flex items-center space-x-3">
                                     <div className="p-2 bg-blue-100 dark:bg-blue-900 rounded-lg">
-                                        <FiMessageSquare className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                                        <FiMessageSquare className="w-6 h-6 text-blue-600 dark:text-blue-400"/>
                                     </div>
                                     <div>
                                         <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                                            {session.mode === 'text' ? 'Text Session' : 'Voice Sessioan'}
+                                            {session.title ? session.title : (session.mode === 'text' ? 'Text Session' : 'Voice Session')}
                                         </h3>
                                         <div className="flex items-center space-x-3 mt-1">
                                             <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center">
-                                                <FiClock className="w-4 h-4 mr-1" />
+                                                <FiClock className="w-4 h-4 mr-1"/>
                                                 {new Date(session.created_at!).toLocaleString()}
                                             </p>
                                             <div className="flex items-center text-sm text-blue-500 dark:text-blue-400">
-                                                <FiTag className="w-4 h-4 mr-1" />
+                                                <FiTag className="w-4 h-4 mr-1"/>
                                                 {departments.find((d) => d.department_id === session.department)?.name || 'Unknown'}
+                                                &nbsp;|&nbsp; {session.model === 'pro' ? 'Pro Mode' : 'Fast Mode'}
                                             </div>
                                         </div>
                                     </div>
@@ -243,31 +287,42 @@ export default function ChatHistory() {
                                         className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/50 rounded-lg transition-colors"
                                         title="Delete chat"
                                     >
-                                        <FiTrash2 className="w-5 h-5" />
+                                        <FiTrash2 className="w-5 h-5"/>
                                     </button>
                                 </div>
                             </div>
 
-                            <div className="mt-4">
-                                <p className="text-gray-600 dark:text-gray-300 line-clamp-2">
-                                    {session.summery ? session.summery : 'No summary available...'}
-                                </p>
+                            <div className="mt-4 flex items-center justify-between">
+                                {/*<p className="text-gray-600 dark:text-gray-300 line-clamp-2 flex-1">*/}
+                                {/*    {session.summery ? session.summery : getLastMessageExcerpt(session)}*/}
+                                {/*</p>*/}
                             </div>
 
                             <div className="mt-4 flex justify-end">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleViewSummary(session);
+                                    }}
+                                    className="flex items-center space-x-2 px-4 py-2 bg-gray-100 dark:bg-zinc-700 rounded-lg hover:bg-gray-200 dark:hover:bg-zinc-600 text-gray-700 dark:text-gray-200  rounded-lg transition-colors mr-3"
+                                    title="View Summary"
+                                >
+                                    <span>Summerize</span>
+                                    <FiEye className="w-4 h-4"/>
+                                </button>
                                 <button
                                     onClick={(e) => handleContinueChat(e, session.session_id)}
                                     className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
                                 >
                                     <span>Continue Chat</span>
-                                    <FiArrowRight className="w-4 h-4" />
+                                    <FiArrowRight className="w-4 h-4"/>
                                 </button>
                             </div>
                         </motion.div>
                     ))
                 ) : (
                     <div className="text-center py-12 bg-white dark:bg-zinc-800 rounded-xl">
-                        <FiMessageSquare className="w-12 h-12 mx-auto text-gray-400 dark:text-gray-600" />
+                        <FiMessageSquare className="w-12 h-12 mx-auto text-gray-400 dark:text-gray-600"/>
                         <h3 className="mt-4 text-lg font-medium text-gray-900 dark:text-white">
                             {selectedDepartment === 'all' ? 'No chat history' : `No chats in this department`}
                         </h3>
@@ -284,31 +339,33 @@ export default function ChatHistory() {
             <AnimatePresence>
                 {selectedSession && (
                     <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
+                        initial={{opacity: 0}}
+                        animate={{opacity: 1}}
+                        exit={{opacity: 0}}
                         className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
                         onClick={() => setSelectedSession(null)}
                     >
                         <motion.div
-                            initial={{ scale: 0.95 }}
-                            animate={{ scale: 1 }}
-                            exit={{ scale: 0.95 }}
+                            initial={{scale: 0.95}}
+                            animate={{scale: 1}}
+                            exit={{scale: 0.95}}
                             onClick={(e) => e.stopPropagation()}
                             className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl w-full max-w-3xl max-h-[80vh] overflow-hidden"
                         >
-                            <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                            <div
+                                className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
                                 <div>
                                     <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-                                        {selectedSession.mode === 'text' ? 'Text Session' : 'Voice Session'}
+                                        {selectedSession.title ? selectedSession.title : (selectedSession.mode === 'text' ? 'Text Session' : 'Voice Session')}
                                     </h2>
                                     <div className="flex items-center space-x-3 mt-1">
                                         <p className="text-sm text-gray-500 dark:text-gray-400">
                                             {new Date(selectedSession.created_at!).toLocaleString()}
                                         </p>
                                         <div className="flex items-center text-sm text-blue-500 dark:text-blue-400">
-                                            <FiTag className="w-4 h-4 mr-1" />
+                                            <FiTag className="w-4 h-4 mr-1"/>
                                             {departments.find((d) => d.department_id === selectedSession.department)?.name || 'Unknown'}
+                                            &nbsp;|&nbsp; {selectedSession.model === 'pro' ? 'Pro Mode' : 'Fast Mode'}
                                         </div>
                                     </div>
                                 </div>
@@ -316,7 +373,7 @@ export default function ChatHistory() {
                                     onClick={() => setSelectedSession(null)}
                                     className="p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 rounded-lg transition-colors"
                                 >
-                                    <FiX className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+                                    <FiX className="w-5 h-5 text-gray-500 dark:text-gray-400"/>
                                 </button>
                             </div>
 
@@ -352,8 +409,53 @@ export default function ChatHistory() {
                                     className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
                                 >
                                     <span>Continue Chat</span>
-                                    <FiArrowRight className="w-4 h-4" />
+                                    <FiArrowRight className="w-4 h-4"/>
                                 </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Summary Modal */}
+            <AnimatePresence>
+                {summaryModalSession && (
+                    <motion.div
+                        initial={{opacity: 0}}
+                        animate={{opacity: 1}}
+                        exit={{opacity: 0}}
+                        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                        onClick={() => setSummaryModalSession(null)}
+                    >
+                        <motion.div
+                            initial={{scale: 0.95}}
+                            animate={{scale: 1}}
+                            exit={{scale: 0.95}}
+                            onClick={(e) => e.stopPropagation()}
+                            className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl w-full max-w-4xl max-h-[80vh] overflow-hidden"
+                        >
+                            <div
+                                className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+                                    Conversation Summary
+                                </h2>
+                                <button
+                                    onClick={() => setSummaryModalSession(null)}
+                                    className="p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 rounded-lg transition-colors"
+                                >
+                                    <FiX className="w-5 h-5 text-gray-500 dark:text-gray-400"/>
+                                </button>
+                            </div>
+                            <div className="p-6 overflow-y-auto max-h-[70vh] space-y-4">
+                                {loadingSummary ? (
+                                    <p className="text-gray-600 dark:text-gray-300">Loading summary...</p>
+                                ) : (
+                                    <p className="text-gray-600 dark:text-gray-300 whitespace-pre-wrap">
+                                        <ReactMarkdown>
+                                            {sessionSummary}
+                                        </ReactMarkdown>
+                                    </p>
+                                )}
                             </div>
                         </motion.div>
                     </motion.div>
