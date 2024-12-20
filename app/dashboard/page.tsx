@@ -2,10 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { FiPlus, FiSend, FiMic, FiMicOff } from 'react-icons/fi';
+import { FiSend, FiMic, FiMicOff } from 'react-icons/fi';
 import { createClient } from "@/utils/supabase/client";
 import {motion} from "framer-motion";
-// import { useSession } from 'next-auth/react';
 
 interface Department {
     department_id: string;
@@ -28,6 +27,7 @@ export default function DashboardPage() {
     const [mode, setMode] = useState<'text' | 'voice'>('text');
     const [departments, setDepartments] = useState<Department[]>([]);
     const [selectedDepartment, setSelectedDepartment] = useState<string | null>(null);
+    const [selectedModel, setSelectedModel] = useState<string | null>("fast");
     const [inputMessage, setInputMessage] = useState('');
     const [isRecording, setIsRecording] = useState(false); // Dummy state, no functionality here yet
 
@@ -105,6 +105,8 @@ export default function DashboardPage() {
         setMode('voice');
     };
 
+    console.log(selectedModel)
+
     const handleSendAndGoToChat = async () => {
         if (!inputMessage.trim() || !selectedDepartment || !combinedUserData) return;
 
@@ -117,7 +119,8 @@ export default function DashboardPage() {
                 {
                     user: combinedUserData.id,
                     mode: 'text',
-                    department: selectedDepartment
+                    department: selectedDepartment,
+                    model : selectedModel
                 }
             ])
             .select(); // to get the newly created session_id
@@ -199,93 +202,105 @@ export default function DashboardPage() {
         router.push(`/dashboard/${newSessionId}`);
     };
 
-    const handleNewChat = () => {
-        // If you want to open a department modal or something else, you can do so here
-        // Currently set to open a modal. If you don't need a modal anymore, remove this.
-        setShowDepartmentModal(true);
-    };
-
     return (
-        <div className="p-6">
+        <div className="p-6 bg-gray-50 dark:bg-zinc-900">
             {/* Top Bar */}
-            <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-8 mb-6">
-                <div className="flex justify-between items-center">
+            <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-md p-8 mb-6">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center space-y-4 md:space-y-0">
                     {/* Welcome Banner */}
                     <motion.div
-                        initial={{opacity: 0, y: 20}}
-                        animate={{opacity: 1, y: 0}}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="w-full md:w-auto"
                     >
-                            <div>
-                                <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-                                    Welcome back {combinedUserData?.username}! 👋
-                                </h1>
-                                <p className="text-gray-600 dark:text-gray-300">
-                                    How can I assist you today?
-                                </p>
-                            </div>
+                        <div>
+                            <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+                                Welcome back {combinedUserData?.username}! 👋
+                            </h1>
+                            <p className="text-gray-600 dark:text-gray-300">
+                                How can I assist you today?
+                            </p>
+                        </div>
                     </motion.div>
-                    {/*<div>*/}
-                    {/*    <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">*/}
-                    {/*        Chat Session: (No session)*/}
-                    {/*    </h1>*/}
-                    {/*    <p className="text-gray-600 dark:text-gray-300">*/}
-                    {/*        Department: {*/}
-                    {/*        selectedDepartment*/}
-                    {/*            ? departments.find(d => d.department_id === selectedDepartment)?.name*/}
-                    {/*            : 'Not selected'*/}
-                    {/*    } | Mode: {mode}*/}
-                    {/*    </p>*/}
-                    {/*</div>*/}
-                    <div className="flex items-center space-x-4">
-                        {/* Department selection dropdown */}
-                        <select
-                            value={selectedDepartment || ''}
-                            onChange={(e) => setSelectedDepartment(e.target.value)}
-                            className="p-2 bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white rounded-lg"
-                        >
-                            {departments.map((dept) => (
-                                <option key={dept.department_id} value={dept.department_id}>
-                                    {dept.name}
-                                </option>
-                            ))}
-                        </select>
 
-                        {/*<button*/}
-                        {/*    onClick={handleNewChat}*/}
-                        {/*    className="flex items-center space-x-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"*/}
-                        {/*>*/}
-                        {/*    <FiPlus className="w-5 h-5" />*/}
-                        {/*    <span>New Chat</span>*/}
-                        {/*</button>*/}
+                    {/* Controls */}
+                    <div className="flex flex-col md:flex-row items-start md:items-center space-y-4 md:space-y-0 md:space-x-4">
+                        {/* Department Dropdown */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                Select Department
+                            </label>
+                            <select
+                                value={selectedDepartment || ''}
+                                onChange={(e) => setSelectedDepartment(e.target.value)}
+                                className="p-2 bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white rounded-lg w-full md:w-64"
+                            >
+                                {departments.map((dept) => (
+                                    <option key={dept.department_id} value={dept.department_id}>
+                                        {dept.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Chat Mode */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                Chat Mode
+                            </label>
+                            <div className="flex items-center justify-between p-1 bg-gray-100 dark:bg-zinc-700 rounded-lg w-full md:w-64">
+                                <button
+                                    onClick={() => setSelectedModel('fast')}
+                                    className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${
+                                        selectedModel === 'fast'
+                                            ? 'bg-white dark:bg-zinc-800 text-blue-600 shadow-sm'
+                                            : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+                                    }`}
+                                >
+                                    Fast Mode
+                                </button>
+                                <button
+                                    onClick={() => setSelectedModel('pro')}
+                                    className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${
+                                        selectedModel === 'pro'
+                                            ? 'bg-white dark:bg-zinc-800 text-blue-600 shadow-sm'
+                                            : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+                                    }`}
+                                >
+                                    Pro Mode
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            {/* Chat Area (Empty clone) */}
-            <div className="flex space-x-2">
-                <div className="w-full bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-6">
-                    <div className="h-[calc(100vh-28rem)] overflow-y-auto mb-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-zinc-600">
-                        {/* No messages here since it's a placeholder */}
+            {/* Chat Area */}
+            <div className="flex flex-col space-y-6">
+                {/* Chat Messages */}
+                <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-md p-6 flex-1">
+                    <div className="h-[calc(100vh-28rem)] overflow-y-auto space-y-4 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-zinc-600">
+                        {/* Placeholder for messages */}
+                        {/*<div className="text-gray-500 dark:text-gray-400 text-center">*/}
+                        {/*    No messages yet. Start the conversation!*/}
+                        {/*</div>*/}
                     </div>
 
                     {/* Lower Control Bar */}
-                    <div className="flex items-center space-x-4">
+                    <div className="mt-4 flex items-center space-x-4">
+                        {/* Microphone Button */}
                         <button
-                            // onMouseDown={() => {
-                            //     setIsRecording(true);
-                            //     handleModeSwitchOnMic();
-                            // }}
-                            // onMouseUp={() => setIsRecording(false)}
                             onClick={handleConnectVoice}
-                            className={`p-2 rounded-full transition-colors ${
+                            className={`p-3 rounded-full transition-colors ${
                                 isRecording
                                     ? 'bg-red-500 hover:bg-red-600 text-white'
                                     : 'bg-gray-100 hover:bg-gray-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-gray-800 dark:text-white'
                             }`}
                         >
-                            {isRecording ? <FiMicOff size={20}/> : <FiMic size={20}/>}
+                            {isRecording ? <FiMicOff size={20} /> : <FiMic size={20} />}
                         </button>
-                        {/* Text input */}
+
+                        {/* Text Input */}
                         <input
                             type="text"
                             value={inputMessage}
@@ -293,44 +308,18 @@ export default function DashboardPage() {
                             placeholder="Type your message..."
                             className="flex-1 p-4 rounded-xl bg-gray-100 dark:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 dark:text-white"
                         />
+
+                        {/* Send Button */}
                         <button
                             onClick={handleSendAndGoToChat}
                             className="p-4 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
-                            <FiSend size={20}/>
+                            <FiSend size={20} />
                         </button>
                     </div>
                 </div>
             </div>
-
-            {/*/!* Additional Controls *!/*/}
-            {/*<div className="mt-8">*/}
-            {/*    /!*<h2 className="text-xl font-bold mb-2">Send a Text Message</h2>*!/*/}
-            {/*    /!*<p className="mb-2">Type your message above and click below to start a real chat:</p>*!/*/}
-            {/*    /!*<button*!/*/}
-            {/*    /!*    onClick={handleSendAndGoToChat}*!/*/}
-            {/*    /!*    className="px-4 py-2 bg-green-500 text-white rounded-lg mr-4"*!/*/}
-            {/*    /!*>*!/*/}
-            {/*    /!*    Send & Go to Chat*!/*/}
-            {/*    /!*</button>*!/*/}
-
-            {/*    /!*<h2 className="text-xl font-bold mt-8 mb-2">Connect via Voice</h2>*!/*/}
-            {/*    /!*<p className="mb-2">Click the mic button above to enter voice mode. Then connect:</p>*!/*/}
-            {/*    /!*<button*!/*/}
-            {/*    /!*    onClick={handleConnectVoice}*!/*/}
-            {/*    /!*    disabled={mode !== 'voice'}*!/*/}
-            {/*    /!*    className="px-4 py-2 bg-purple-500 text-white rounded-lg"*!/*/}
-            {/*    /!*>*!/*/}
-            {/*    /!*    Connect & Go to Chat*!/*/}
-            {/*    /!*</button>*!/*/}
-            {/*    /!*{mode !== 'voice' && (*!/*/}
-            {/*    /!*    <p className="text-red-600 mt-2">Click mic button to switch to Voice mode first!</p>*!/*/}
-            {/*    /!*)}*!/*/}
-            {/*</div>*/}
-
-            {/*<div className="mt-4">*/}
-            {/*    <p>Current mode: {mode}</p>*/}
-            {/*</div>*/}
         </div>
     );
+
 }

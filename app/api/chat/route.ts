@@ -7,14 +7,31 @@ const openai = new OpenAI({
 
 export async function POST(req: Request) {
     try {
-        const { query, department, access_level, history } = await req.json();
+        const { query, department, access_level, history, model } = await req.json();
 
-        console.log(`${process.env.NEXT_PUBLIC_RETRIVEL_BACKEND}/complete-query`)
+        // Determine the backend URL and endpoint based on the mode
+        const backendURL =
+            model === 'pro'
+                ? process.env.NEXT_PUBLIC_PRO_RETRIVEL_BACKEND
+                : process.env.NEXT_PUBLIC_RETRIVEL_BACKEND;
 
-        const ragResponse = await fetch(`${process.env.NEXT_PUBLIC_RETRIVEL_BACKEND}/complete-query`, {
+        const endpoint = model === 'pro' ? '/api/route-query' : '/complete-query';
+
+        console.log(`${backendURL}${endpoint}`);
+
+        console.log(department)
+        console.log(access_level)
+        console.log(query)
+
+        // Step 1: Query the appropriate backend
+        const ragResponse = await fetch(`${backendURL}${endpoint}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query, department, access_level }),
+            body: JSON.stringify({
+                query,
+                department: model === 'fast' ? department : undefined, // Only include department for fast mode
+                access_level: model === 'fast' ? access_level : undefined, // Only include access_level for fast mode
+            }),
         });
 
         if (!ragResponse.ok) {
@@ -22,10 +39,26 @@ export async function POST(req: Request) {
         }
 
         const ragData = await ragResponse.json();
-        console.log(ragData.answer) // also this is give success:true you can check if context is available. so when sending the context you can say error retriving context
+        console.log(ragData);
 
-        // Step 2: Check if context retrieval was successful
-        const context = ragData.success === true ? ragData.answer : "Error retrieving context";
+        // Step 2: Extract context, sources, and imageUrls based on the API
+        let context = '';
+        let sources = [];
+        let imageUrls = [];
+
+        if (model === 'pro') {
+            // Extract from `/api/route-query` response
+            context = ragData.response?.analysis?.join('\n') || 'Error retrieving context';
+            sources = ragData.response?.sources || [];
+        } else {
+            // Extract from `/complete-query` response
+            context = ragData.finalanswer || 'Error retrieving context';
+            imageUrls = ragData.imageUrls || [];
+        }
+
+        // Ensure `sources` and `imageUrls` are always included
+        sources = sources || [];
+        imageUrls = imageUrls || [];
 
         // Step 3: Prepare message format for OpenAI
         const formattedContent = `
@@ -39,14 +72,18 @@ ${context}
 ${query}
         `;
 
-        console.log("Formatted Content:", formattedContent);
+        console.log('Formatted Content:', formattedContent);
 
+        // Step 4: Call OpenAI's Chat Completion API
         const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
+            model: 'gpt-4o-mini',
             messages: [
-                { role: "system", content: "You are a helpful assistant for VeracityAI. Answer the given question based on the given context" },
                 {
-                    role: "user",
+                    role: 'system',
+                    content: 'You are a helpful assistant for VeracityAI. Answer the given question based on the given context.',
+                },
+                {
+                    role: 'user',
                     content: formattedContent,
                 },
             ],
@@ -54,18 +91,20 @@ ${query}
             max_tokens: 500,
         });
 
+        // Step 5: Return the response
         return NextResponse.json({
             message: completion.choices[0].message.content,
             context: context,
-            status: 200
+            sources: sources,
+            imageUrls: imageUrls,
+            status: 200,
+            success: true,
         });
     } catch (error) {
         console.error('Error in chat route:', error);
         return NextResponse.json(
             { error: 'Internal server error' },
-            { status: 500 }
+            { status: 500 },
         );
     }
 }
-
-

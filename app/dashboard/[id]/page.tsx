@@ -15,6 +15,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
+import {useRecordVoice} from "@/hooks/useRecord";
 
 interface Message {
     id: string;
@@ -31,6 +32,7 @@ interface SessionData {
     user: string;
     mode: 'text' | 'voice';
     department: string; //  department id
+    model: 'fast' | 'pro'
 }
 
 interface ChatRow {
@@ -61,7 +63,7 @@ interface Collaborator {
 }
 
 interface Department {
-    id: string;
+    department_id: string;
     name: string;
 }
 
@@ -96,10 +98,7 @@ export default function Dashboard() {
     const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<CombinedUserDataInterface[]>([]);
     const [accessLevel, setAccessLevel] = useState<'read' | 'write'>('write');
     const [customMessage, setCustomMessage] = useState('');
-  const [showUserDropdown, setShowUserDropdown] = useState(false);
-
-    // Mode toggle (fast or pro) - just a placeholder here
-    const [isFastMode, setIsFastMode] = useState(true);
+    const [showUserDropdown, setShowUserDropdown] = useState(false);
 
     const apiKey = process.env.NEXT_PUBLIC_OPENAI_KEY || '';
     const sessionId = pathname.split('/').pop() || '';
@@ -113,6 +112,8 @@ export default function Dashboard() {
     );
     const [isConnected, setIsConnected] = useState(false);
     const connectConversationOnce = useRef(false);
+
+    const {startTextRecording, stopTextRecording, textByHook} = useRecordVoice();
 
     const chatContainerRef = useRef<HTMLDivElement>(null);
     const messageBuffers = useRef<Record<string, {
@@ -212,7 +213,7 @@ export default function Dashboard() {
         const {data, error} = await supabase
             .from('department')
             .select('name')
-            .eq('id', deptId)
+            .eq('department_id', deptId)
             .single();
         if (error) {
             console.error('Error fetching department name:', error);
@@ -347,14 +348,19 @@ export default function Dashboard() {
                 if (!initialAssistantRequested.current && userCount === 1 && assistantCount === 0 && loadedMessages.length === 1 && loadedMessages[0].type === 'user') {
                     initialAssistantRequested.current = true;
                     setIsProcessing(true);
+                    console.log(name)
+                    console.log(sessionRows)
+                    console.log(sess)
+                    console.log(department)
                     try {
                         const response = await fetch('/api/chat', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json',},
                             body: JSON.stringify({
                                 query: loadedMessages[0].content,
-                                department: [sess.department],
-                                access_level: 1
+                                department: [name],
+                                access_level: 1,
+                                model: sess.model
                             })
                         });
 
@@ -398,7 +404,64 @@ export default function Dashboard() {
         if (combinedUserData) {
             loadSessionData();
         }
-    }, [sessionId, supabase, combinedUserData]);
+    }, [sessionId, supabase, combinedUserData, department]);
+
+    useEffect(() => {
+        const sendMessageFromHook = async () => {
+            if (!textByHook || !sessionData) return;
+
+            // Mimic user message behavior
+            setIsProcessing(true);
+            const userMessageContent = textByHook.trim();
+
+            // Add the user message to the database
+            await saveMessageToDB('user', userMessageContent);
+
+            const userCount = messages.filter(m => m.type === 'user').length;
+            const assistantCount = messages.filter(m => m.type === 'assistant').length;
+            let body: any = {
+                query: userMessageContent,
+                department: [department],
+                access_level: 1,
+                model: sessionData.model
+            };
+
+            // If there's message history, include it
+            if (!(userCount === 0 && assistantCount === 0)) {
+                body.history = buildHistoryString();
+            }
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+
+                if (!response.ok) throw new Error('Failed to get assistant response');
+
+                const data = await response.json();
+                const assistantMessageContent = data.message;
+
+                // Save assistant response in the database
+                await saveMessageToDB('assistant', assistantMessageContent);
+
+                setIsProcessing(false);
+            } catch (error) {
+                console.error('Error sending message:', error);
+                const errorMsg =
+                    "I apologize, but I'm having trouble responding right now. Please try again.";
+                await saveMessageToDB('assistant', errorMsg);
+                setIsProcessing(false);
+            } finally {
+                // Reset textByHook after handling
+                setInputMessage(''); // Clear the input for UI purposes
+            }
+        };
+
+        sendMessageFromHook();
+    }, [textByHook]); // Re-run whenever `textByHook` changes
+
 
     useEffect(() => {
         if (chatContainerRef.current) {
@@ -406,7 +469,10 @@ export default function Dashboard() {
         }
     }, [messages]);
 
-    const saveMessageToDB = async (role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null, function_call?: string | null, function_call_text?: string | null) => {
+    const saveMessageToDB = async (
+        role: 'user' | 'assistant' | 'system', content: string, openai_id?: string | null,
+        function_call?: string | null, function_call_text?: string | null
+    ) => {
         if (!sessionData || !combinedUserData) return;
         if (openai_id) {
             const {data: existing} = await supabase
@@ -476,8 +542,9 @@ export default function Dashboard() {
         const assistantCount = messages.filter(m => m.type === 'assistant').length;
         let body: any = {
             query: userMessageContent,
-            department: [sessionData.department],
-            access_level: 1
+            department: [department],
+            access_level: 1,
+            model: sessionData.model
         };
         if (!(userCount === 0 && assistantCount === 0)) {
             body.history = buildHistoryString();
@@ -543,6 +610,23 @@ export default function Dashboard() {
         }
         setShowAddUserDropdown(false);
     };
+
+    async function removeCollaborator(userIdToRemove: string) {
+        if (!sessionData) return;
+        const {error} = await supabase
+            .from('colab')
+            .delete()
+            .match({session_id: sessionData.session_id, user_id: userIdToRemove});
+
+        if (error) {
+            console.error("Error removing collaborator:", error);
+            return;
+        }
+
+        const updated = await loadCollaborators(sessionData.session_id);
+        setCollaborators(updated);
+    }
+
 
     // Add multiple collaborators from modal
     const handleAddMultipleCollaborators = async () => {
@@ -614,7 +698,7 @@ export default function Dashboard() {
                         body: JSON.stringify({
                             query,
                             department: [session.department],
-                            access_level: 1
+                            access_level: 1,
                         })
                     });
 
@@ -751,31 +835,70 @@ export default function Dashboard() {
 
     // Text mode mic button: record audio, call whisper API, set input message
     const handleTranscribeAudio = async (audioBlob: Blob) => {
-        // Implement whisper API call
-        // Placeholder simulation
-        const transcription = "Transcribed text from audio";
-        setInputMessage(transcription);
+        try {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'speech.wav'); // or speech.webm depending on your recording format
+
+            const response = await fetch('/api/transcribe', {
+                method: 'POST',
+                body: formData,
+            });
+
+            console.log(response)
+
+            if (!response.ok) {
+                throw new Error('Failed to transcribe audio');
+            }
+
+            const {text} = await response.json();
+            setInputMessage(text);
+        } catch (error) {
+            console.error('Transcription error:', error);
+            alert("This feature is in beta mode and encountered an error. Please try again later.");
+        }
     };
 
+
     const startTextModeRecording = async () => {
-        // Push-to-talk for text mode
-        setIsRecording(true);
-        const wavRecorder = wavRecorderRef.current;
-        if (!wavRecorder.recording) {
-            await wavRecorder.record((data) => {
-                // We'll collect data, and on stop we'll transcribe
-            });
+        try {
+            setIsRecording(true);
+            const wavRecorder = wavRecorderRef.current;
+
+            // Call `.begin()` if not already started
+            if (!wavRecorder.processor) {
+                await wavRecorder.begin(); // This initializes the recorder
+            }
+
+            // Start recording
+            if (!wavRecorder.recording) {
+                await wavRecorder.record((data) => {
+                    // Process audio chunks here (optional)
+                });
+            }
+        } catch (error) {
+            console.error("Error starting recording:", error);
+            alert("This feature is in beta mode. Please try again later.");
+            setIsRecording(false); // Reset recording state on failure
         }
     };
 
     const stopTextModeRecording = async () => {
-        setIsRecording(false);
-        const wavRecorder = wavRecorderRef.current;
-        if (wavRecorder.recording) {
-            const blob = await wavRecorder.stop();
-            if (blob) {
-                await handleTranscribeAudio(blob);
+        try {
+            console.log("Stopping............")
+            setIsRecording(false);
+            const wavRecorder = wavRecorderRef.current;
+
+            if (wavRecorder.recording) {
+                const audioData = await wavRecorder.end(); // Get raw audio data
+                console.log('Audio Data Type:', typeof audioData, audioData);
+                const audioBlob = new Blob([audioData], {type: 'audio/wav'}); // Convert to Blob
+                if (audioBlob) {
+                    await handleTranscribeAudio(audioBlob); // Pass to transcription
+                }
             }
+        } catch (error) {
+            console.error("Error stopping recording:", error);
+            alert("This feature is in beta mode. Please try again later.");
         }
     };
 
@@ -870,44 +993,48 @@ export default function Dashboard() {
                         >
                             <FiUsers className="w-4 h-4"/>
                         </motion.button>
-            {/* Display up to 3 online collaborators + "more" */}
-            {(() => {
-              const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
-              const displayedOnlineCollaborators = onlineCollaborators.slice(0, 1);
-              const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
+                        {/* Display up to 3 online collaborators + "more" */}
+                        {(() => {
+                            const onlineCollaborators = collaborators.filter(c => onlineUsers.includes(c.user_id));
+                            const displayedOnlineCollaborators = onlineCollaborators.slice(0, 2);
+                            const moreCount = onlineCollaborators.length - displayedOnlineCollaborators.length;
 
-              return (
-                        <div className="flex items-center space-x-1 relative">
-                  {displayedOnlineCollaborators.map((c) => (
-                                <div
-                                    key={c.user_id}
-                                    className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
-                                >
-                                    <img
-                                        src={c.avatar_url || '/default-avatar.png'}
-                                        alt={c.username}
-                                        className="w-full h-full rounded-full"
-                                    />
+                            return (
+                                <div className="flex items-center space-x-1 relative">
+                                    {displayedOnlineCollaborators.map((c) => (
+                                        <div
+                                            key={c.user_id}
+                                            className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
+                                        >
+                                            <img
+                                                src={c.avatar_url || '/default-avatar.png'}
+                                                alt={c.username}
+                                                className="w-full h-full rounded-full"
+                                            />
+                                            {onlineUsers.includes(c.user_id) && (
+                                                <span
+                                                    className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-white dark:border-zinc-800"></span>
+                                            )}
+                                        </div>
+                                    ))}
+                                    {moreCount > 0 && (
+                                        <motion.button
+                                            whileHover={{scale: 1.05}}
+                                            whileTap={{scale: 0.95}}
+                                            onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
+                                            className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800 bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-xs font-medium text-gray-600 dark:text-gray-300 relative group"
+                                            title="View more participants"
+                                        >
+                                            +{moreCount}
+                                            <div
+                                                className="absolute top-full mt-1 py-1 px-2 bg-black text-white text-xs rounded-lg opacity-0 group-hover:opacity-100">
+                                                more...
+                                            </div>
+                                        </motion.button>
+                                    )}
                                 </div>
-                            ))}
-                  {moreCount > 0 && (
-                                <motion.button
-                                    whileHover={{scale: 1.05}}
-                                    whileTap={{scale: 0.95}}
-                                    onClick={() => setIsParticipantsPanelOpen(!isParticipantsPanelOpen)}
-                                    className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800 bg-gray-200 dark:bg-zinc-700 flex items-center justify-center text-xs font-medium text-gray-600 dark:text-gray-300 relative group"
-                                    title="View more participants"
-                                >
-                                    +{moreCount}
-                                    <div
-                                        className="absolute top-full mt-1 py-1 px-2 bg-black text-white text-xs rounded-lg opacity-0 group-hover:opacity-100">
-                                        more...
-                                    </div>
-                                </motion.button>
-                            )}
-                        </div>
-              );
-            })()}
+                            );
+                        })()}
                     </div>
 
                     {/* Right - Department, Mode, New Chat */}
@@ -922,16 +1049,16 @@ export default function Dashboard() {
                         )}
                         {sessionData && sessionData.mode === 'text' && (
                             <div className={`flex items-center px-2.5 py-1.5 rounded-lg ${
-                                isFastMode
+                                sessionData.model === 'fast'
                                     ? 'bg-green-50 dark:bg-green-900/30'
                                     : 'bg-purple-50 dark:bg-purple-900/30'
                             }`}>
                 <span className={`text-sm font-medium ${
-                    isFastMode
+                    sessionData.model === 'fast'
                         ? 'text-green-700 dark:text-green-300'
                         : 'text-purple-700 dark:text-purple-300'
                 }`}>
-                  {isFastMode ? 'Fast Mode' : 'Pro Mode'}
+                  {sessionData.model === 'fast' ? 'Fast Mode' : 'Pro Mode'}
                 </span>
                             </div>
                         )}
@@ -978,12 +1105,17 @@ export default function Dashboard() {
                                     const online = onlineUsers.includes(c.user_id);
                                     return (
                                         <div key={c.user_id}
-                                             className="flex items-center space-x-3 p-2 rounded-md bg-white dark:bg-zinc-900 shadow-sm border border-gray-200 dark:border-zinc-700">
-                                            <img
-                                                src={c.avatar_url || '/default-avatar.png'}
-                                                alt={c.username}
-                                                className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
-                                            />
+                                             className="relative flex items-center space-x-3 p-2 rounded-md bg-white dark:bg-zinc-900 shadow-sm border border-gray-200 dark:border-zinc-700">
+                                            <div className="relative">
+                                                <img
+                                                    src={c.avatar_url || '/default-avatar.png'}
+                                                    alt={c.username}
+                                                    className="w-8 h-8 rounded-full border-2 border-white dark:border-zinc-800"
+                                                />
+                                                {/*{online && (*/}
+                                                {/*    <span className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-white dark:border-zinc-800"></span>*/}
+                                                {/*)}*/}
+                                            </div>
                                             <div className="flex-1">
                                                 <p className="text-sm text-gray-900 dark:text-white font-semibold">{c.username}</p>
                                                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -991,6 +1123,16 @@ export default function Dashboard() {
                                                     <span className="text-green-500 ml-1">● online</span>}
                                                 </p>
                                             </div>
+
+                                            {combinedUserData?.id === sessionData?.user && (
+                                                <button
+                                                    onClick={() => removeCollaborator(c.user_id)}
+                                                    className="text-red-500 hover:text-red-700 p-1 rounded-md"
+                                                    title="Remove Collaborator"
+                                                >
+                                                    <FiX className="w-4 h-4"/>
+                                                </button>
+                                            )}
                                         </div>
                                     );
                                 })}
@@ -1074,10 +1216,10 @@ export default function Dashboard() {
 
                                     {/* Push-to-talk mic for text mode */}
                                     <motion.button
-                                        whileHover={{scale: 1.05}}
+                                        whileHover={{scale: 1.5}}
                                         whileTap={{scale: 0.95}}
-                                        onMouseDown={startTextModeRecording}
-                                        onMouseUp={stopTextModeRecording}
+                                        onMouseDown={startTextRecording}
+                                        onMouseUp={stopTextRecording}
                                         className={`p-1.5 rounded-lg transition-colors ${
                                             isRecording
                                                 ? 'text-red-500 hover:text-red-600 bg-red-50 dark:bg-red-900/30'
@@ -1151,76 +1293,83 @@ export default function Dashboard() {
                                     onClick={() => setShowAddCollaboratorsModal(false)}
                                     className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
                                 >
-                <FiX className="w-5 h-5" />
+                                    <FiX className="w-5 h-5"/>
                                 </button>
                             </div>
 
                             {/* User selection with tags */}
-            <div className="mb-4 relative">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Add People
-              </label>
-              <div
-                className="flex flex-wrap items-center border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 p-2 cursor-text"
-                onClick={() => setShowUserDropdown(!showUserDropdown)}
-              >
-                {selectedUsersToAdd.map(u => (
-                  <div key={u.id} className="flex items-center bg-blue-100 text-blue-700 rounded-full px-2 py-1 text-sm mr-2 mb-2">
-                    <img src={u.avatar_url || '/default-avatar.png'} alt={u.username} className="w-4 h-4 rounded-full mr-1"/>
-                    <span>{u.username}</span>
-                    <button onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedUsersToAdd(selectedUsersToAdd.filter(su => su.id !== u.id));
-                    }} className="ml-1 text-blue-700 hover:text-blue-900"><FiX /></button>
-                  </div>
-                ))}
-                {selectedUsersToAdd.length === 0 && (
-                  <span className="text-gray-500 dark:text-gray-400 ml-1">Click to add people...</span>
-                )}
-              </div>
-              {showUserDropdown && (
-                <div className="absolute top-full mt-1 w-full bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-lg shadow-lg max-h-48 overflow-auto z-10">
-                  {availableUsersToPick.length === 0 ? (
-                    <div className="p-2 text-sm text-gray-500 dark:text-gray-300">No users available</div>
-                  ) : (
-                    availableUsersToPick.map(u => (
-                      <div
-                        key={u.id}
-                        className="flex items-center p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
-                        onClick={() => {
-                          setSelectedUsersToAdd([...selectedUsersToAdd, u]);
-                          setShowUserDropdown(false);
-                        }}
-                      >
-                        <img src={u.avatar_url || '/default-avatar.png'} alt={u.username} className="w-6 h-6 rounded-full mr-2"/>
-                        <span className="text-sm text-gray-700 dark:text-gray-200">{u.username}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
+                            <div className="mb-4 relative">
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                    Add People
+                                </label>
+                                <div
+                                    className="flex flex-wrap items-center border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 p-2 cursor-text"
+                                    onClick={() => setShowUserDropdown(!showUserDropdown)}
+                                >
+                                    {selectedUsersToAdd.map(u => (
+                                        <div key={u.id}
+                                             className="flex items-center bg-blue-100 text-blue-700 rounded-full px-2 py-1 text-sm mr-2 mb-2">
+                                            <img src={u.avatar_url || '/default-avatar.png'} alt={u.username}
+                                                 className="w-4 h-4 rounded-full mr-1"/>
+                                            <span>{u.username}</span>
+                                            <button onClick={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedUsersToAdd(selectedUsersToAdd.filter(su => su.id !== u.id));
+                                            }} className="ml-1 text-blue-700 hover:text-blue-900"><FiX/></button>
+                                        </div>
+                                    ))}
+                                    {selectedUsersToAdd.length === 0 && (
+                                        <span
+                                            className="text-gray-500 dark:text-gray-400 ml-1">Click to add people...</span>
+                                    )}
+                                </div>
+                                {showUserDropdown && (
+                                    <div
+                                        className="absolute top-full mt-1 w-full bg-white dark:bg-zinc-800 border border-gray-300 dark:border-zinc-700 rounded-lg shadow-lg max-h-48 overflow-auto z-10">
+                                        {availableUsersToPick.length === 0 ? (
+                                            <div className="p-2 text-sm text-gray-500 dark:text-gray-300">No users
+                                                available</div>
+                                        ) : (
+                                            availableUsersToPick.map(u => (
+                                                <div
+                                                    key={u.id}
+                                                    className="flex items-center p-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
+                                                    onClick={() => {
+                                                        setSelectedUsersToAdd([...selectedUsersToAdd, u]);
+                                                        setShowUserDropdown(false);
+                                                    }}
+                                                >
+                                                    <img src={u.avatar_url || '/default-avatar.png'} alt={u.username}
+                                                         className="w-6 h-6 rounded-full mr-2"/>
+                                                    <span
+                                                        className="text-sm text-gray-700 dark:text-gray-200">{u.username}</span>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                )}
                             </div>
 
-            {/* Access level */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Access Level
-              </label>
-              <select
-                value={accessLevel}
-                onChange={(e) => setAccessLevel(e.target.value as 'read'|'write')}
-                className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
-              >
-                <option value="write">Write</option>
-                <option value="read">Read</option>
-              </select>
-            </div>
+                            {/* Access level */}
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                    Access Level
+                                </label>
+                                <select
+                                    value={accessLevel}
+                                    onChange={(e) => setAccessLevel(e.target.value as 'read' | 'write')}
+                                    className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                                >
+                                    <option value="write">Write</option>
+                                    <option value="read">View Only</option>
+                                </select>
+                            </div>
 
-            {/* Custom Message */}
+                            {/* Custom Message */}
                             <div className="mb-4">
                                 <label
                                     className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Add a message (optional)
+                                    Add a message (optional)
                                 </label>
                                 <textarea
                                     value={customMessage}
@@ -1251,23 +1400,12 @@ export default function Dashboard() {
                                         onClick={handleAddMultipleCollaborators}
                                         className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
                                     >
-                  Send
+                                        Send
                                     </button>
                                 </div>
                             </div>
                         </motion.div>
                     </div>
-                )}
-
-                {showDepartmentModal && (
-                    <DepartmentModal
-                        onClose={() => setShowDepartmentModal(false)}
-                        onSelect={(dept: string) => {
-                            setDepartment(dept);
-                            setShowDepartmentModal(false);
-                            router.push('/dashboard');
-                        }}
-                    />
                 )}
             </div>
         </div>
