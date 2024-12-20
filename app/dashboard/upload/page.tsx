@@ -1,10 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FiUpload, FiLink, FiFileText, FiDownload } from 'react-icons/fi';
+import { FiUpload, FiLink, FiFileText, FiDownload, FiChevronDown, FiChevronUp } from 'react-icons/fi';
 import { useRouter } from 'next/navigation';
 import { createClient } from "@/utils/supabase/client";
 import DocViewer, { DocViewerRenderers } from "react-doc-viewer";
+import dynamic from 'next/dynamic';
+
+const ReactQuill = dynamic(() => import('react-quill'), { ssr: false });
+import 'react-quill/dist/quill.snow.css';
 
 interface EditState {
     editing: boolean;
@@ -13,7 +17,27 @@ interface EditState {
     workspace: string;
 }
 
-const departmentsList = ['AI', 'Marketing', 'HR', 'Engineering'];
+// CombinedItem represents a merged item (file/url/text)
+interface CombinedItem {
+    type: 'file' | 'url' | 'text';
+    identifier: string;
+    file_type?: string;
+    department: string;
+    access_level: number;
+    workspace: string[];
+    update_timestamp?: string;
+    content: string;
+    s3_url?: string;
+    domain?: string;
+    title?: string;
+    isDisabled: boolean;
+    chunkIds: number[];
+}
+
+interface Department {
+    id: number;
+    name: string;
+}
 
 const UploadPage = () => {
     const supabase = createClient();
@@ -27,38 +51,82 @@ const UploadPage = () => {
     const [textTitle, setTextTitle] = useState('');
     const [textContent, setTextContent] = useState('');
     const [loadingData, setLoadingData] = useState(true);
-
-    interface CombinedItem {
-        type: 'file' | 'url' | 'text';
-        identifier: string;
-        file_type?: string;
-        department: string;
-        access_level: number;
-        workspace: string[];
-        update_timestamp?: string;
-        content: string;
-        s3_url?: string;
-        domain?: string;
-        title?: string;
-    }
-
     const [filesData, setFilesData] = useState<CombinedItem[]>([]);
     const [urlsData, setUrlsData] = useState<CombinedItem[]>([]);
     const [textsData, setTextsData] = useState<CombinedItem[]>([]);
     const [selectedItem, setSelectedItem] = useState<CombinedItem | null>(null);
+    const [departments, setDepartments] = useState<Department[]>([]);
+    const [selectedDepartment, setSelectedDepartment] = useState<string>('');
+    const [showAddDeptModal, setShowAddDeptModal] = useState(false);
+    const [newDepartmentName, setNewDepartmentName] = useState('');
+
+    // For collapsible URL domains
+    const [collapsedDomains, setCollapsedDomains] = useState<Record<string, boolean>>({});
+
+    useEffect(() => {
+        fetchDepartments();
+    }, []);
+
+    useEffect(() => {
+        if (departments.length > 0 && !selectedDepartment) {
+            setSelectedDepartment(departments[0].name);
+        }
+    }, [departments]);
 
     useEffect(() => {
         fetchData();
-    }, []);
+    }, [selectedDepartment]);
+
+    const fetchDepartments = async () => {
+        try {
+            const { data, error } = await supabase.from('department').select('*');
+            if (error) throw error;
+            if (data) {
+                setDepartments(data);
+            }
+        } catch (err: any) {
+            console.error('Error fetching departments:', err);
+            setError('Failed to fetch departments.');
+        }
+    };
+
+    const addDepartment = async () => {
+        if (!newDepartmentName.trim()) {
+            alert('Department name cannot be empty.');
+            return;
+        }
+        try {
+            const { data, error } = await supabase
+                .from('department')
+                .insert([{ name: newDepartmentName.trim() }])
+                .select();
+            if (error) throw error;
+            if (data) {
+                setShowAddDeptModal(false);
+                setNewDepartmentName('');
+                await fetchDepartments();
+                setSuccess('Department added successfully.');
+            }
+        } catch (err: any) {
+            console.error('Error adding department:', err);
+            setError('Failed to add department.');
+        }
+    };
 
     const fetchData = async () => {
         try {
             setLoadingData(true);
-            const { data, error } = await supabase.from('documents3').select('content, metadata');
+
+            // Using 'docs' table now
+            const { data, error } = await supabase
+                .from('documents5')
+                .select('doc_id, content, metadata');
             if (error) throw error;
 
+            console.log(data)
+
             const fileMap: Record<string, CombinedItem> = {};
-            const domainMap: Record<string, CombinedItem[]> = {}; // Map for grouping by domain
+            const domainMap: Record<string, CombinedItem[]> = {};
             const textMap: Record<string, CombinedItem> = {};
 
             data.forEach((row: any) => {
@@ -71,11 +139,14 @@ const UploadPage = () => {
                 }
                 const chunkContent = typeof content === 'string' ? content : JSON.stringify(content);
 
-                const department = metadata.department || 'AI';
+                const department = Array.isArray(metadata.department) && metadata.department.length > 0
+                    ? metadata.department[0] : (metadata.department || selectedDepartment || 'AI');
                 const access_level = metadata.access_level || 1;
                 const workspace = metadata.workspace || [];
                 const wsArray = Array.isArray(workspace) ? workspace : [workspace].filter(Boolean);
+                const isDisabled = metadata.isDisabled === true;
 
+                // Identify item by file_name/url/title
                 if (metadata?.s3_url && metadata?.file_name) {
                     const key = metadata.file_name;
                     if (!fileMap[key]) {
@@ -88,14 +159,19 @@ const UploadPage = () => {
                             workspace: wsArray,
                             update_timestamp: metadata.update_timestamp,
                             content: chunkContent,
-                            s3_url: metadata.s3_url
+                            s3_url: metadata.s3_url,
+                            isDisabled: isDisabled,
+                            chunkIds: [row.doc_id]
                         };
                     } else {
                         fileMap[key].content += '\n' + chunkContent;
+                        fileMap[key].chunkIds.push(row.doc_id);
+                        // If any chunk is disabled, consider the whole item disabled
+                        if (isDisabled) fileMap[key].isDisabled = true;
                     }
                 } else if (metadata?.source_type === 'url' && metadata?.url) {
                     const domain = metadata.domain || 'Unknown Domain';
-                    const urlItem = {
+                    const urlItem: CombinedItem = {
                         type: 'url',
                         identifier: metadata.url,
                         department,
@@ -103,13 +179,30 @@ const UploadPage = () => {
                         workspace: wsArray,
                         domain,
                         update_timestamp: metadata.fetch_time,
-                        content: chunkContent
+                        content: chunkContent,
+                        isDisabled: isDisabled,
+                        chunkIds: [row.doc_id]
                     };
 
                     if (!domainMap[domain]) {
                         domainMap[domain] = [];
+                    } else {
+                        // If disabled chunk found, set domain items disabled
+                        const existing = domainMap[domain].find(i => i.identifier === urlItem.identifier);
+                        if (existing && existing.isDisabled !== isDisabled) {
+                            // if any chunk disabled for same URL, set disabled
+                            existing.isDisabled = existing.isDisabled || isDisabled;
+                        }
                     }
-                    domainMap[domain].push(urlItem);
+
+                    const existingItem = domainMap[domain].find(item => item.identifier === metadata.url);
+                    if (existingItem) {
+                        existingItem.content += '\n' + chunkContent;
+                        existingItem.chunkIds.push(row.doc_id);
+                        if (isDisabled) existingItem.isDisabled = true;
+                    } else {
+                        domainMap[domain].push(urlItem);
+                    }
                 } else if (metadata?.source_type === 'text' && metadata?.title) {
                     const key = metadata.title;
                     if (!textMap[key]) {
@@ -121,13 +214,21 @@ const UploadPage = () => {
                             workspace: wsArray,
                             update_timestamp: metadata.update_timestamp,
                             content: chunkContent,
-                            title: metadata.title
+                            title: metadata.title,
+                            isDisabled: isDisabled,
+                            chunkIds: [row.doc_id]
                         };
                     } else {
                         textMap[key].content += '\n' + chunkContent;
+                        textMap[key].chunkIds.push(row.doc_id);
+                        if (isDisabled) textMap[key].isDisabled = true;
                     }
                 }
             });
+
+            console.log(Object.values(fileMap))
+            console.log(Object.values(domainMap).flat())
+            console.log(Object.values(textMap))
 
             setFilesData(Object.values(fileMap));
             setUrlsData(Object.values(domainMap).flat());
@@ -139,7 +240,6 @@ const UploadPage = () => {
             setLoadingData(false);
         }
     };
-
 
     const handleFileUpload = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -157,9 +257,9 @@ const UploadPage = () => {
                 formData.append('files[]', file);
             });
 
-            formData.append('department', 'AI');
+            formData.append('department', selectedDepartment);
 
-            const response = await fetch('http://127.0.0.1:5000/upload', {
+            const response = await fetch('http://127.0.0.1:5005/upload', {
                 method: 'POST',
                 body: formData,
             });
@@ -174,6 +274,8 @@ const UploadPage = () => {
             setFilesInput(null);
             const fileInput = document.getElementById('file-upload') as HTMLInputElement;
             if (fileInput) fileInput.value = '';
+            // Refresh data
+            fetchData();
         } catch (err: any) {
             setError(err.message || 'Failed to upload files');
             console.error('Upload error:', err);
@@ -199,9 +301,9 @@ const UploadPage = () => {
             validUrls.forEach(url => {
                 formData.append('urls[]', url);
             });
-            formData.append('department', 'AI');
+            formData.append('department', selectedDepartment);
 
-            const response = await fetch('http://localhost:5000/upload', {
+            const response = await fetch('http://127.0.0.1:5005/upload', {
                 method: 'POST',
                 body: formData,
             });
@@ -214,6 +316,8 @@ const UploadPage = () => {
 
             setSuccess('URLs saved successfully');
             setUrlsInput(['']);
+            // Refresh data
+            fetchData();
         } catch (err: any) {
             setError(err.message || 'Failed to save URLs');
             console.error('Upload error:', err);
@@ -234,12 +338,13 @@ const UploadPage = () => {
         setIsUploading(true);
 
         try {
-            const response = await fetch('/api/upload/text', {
+            const response = await fetch('http://127.0.0.1:5005/upload_text', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
+                    department: selectedDepartment,
                     title: textTitle,
                     content: textContent,
                 }),
@@ -254,6 +359,8 @@ const UploadPage = () => {
             setSuccess('Text saved successfully');
             setTextTitle('');
             setTextContent('');
+            // Refresh data
+            fetchData();
         } catch (err: any) {
             setError(err.message || 'Failed to save text');
         } finally {
@@ -276,10 +383,86 @@ const UploadPage = () => {
         setUrlsInput(newUrls.length > 0 ? newUrls : ['']);
     };
 
-    // Convert workspace array to a string and vice versa
     const workspaceArrayToString = (arr: string[]) => arr.join(', ');
     const workspaceStringToArray = (str: string) =>
         str.split(',').map(s => s.trim()).filter(Boolean);
+
+    const toggleDisable = async (item: CombinedItem) => {
+        // Update isDisabled for all chunkIds
+        try {
+            const { error } = await supabase
+                .from('documents5')
+                .update({ 'metadata': { isDisabled: !item.isDisabled } }, { returning: 'minimal' })
+                .in('doc_id', item.chunkIds);
+
+            // The above might overwrite metadata entirely.
+            // If so, we need to fetch current metadata and update isDisabled only.
+            // A safer approach: fetch each row's metadata, set isDisabled, then update.
+            // We'll do that in a loop:
+            // NOTE: A single update can be done if we use RPC or a trigger. For now, let's do multiple updates if needed.
+
+            // Actually, Supabase update on a jsonb column replaces the column.
+            // We need to use Postgres jsonb set operation.
+            // Without that, we can do a client-side approach:
+            // 1. Fetch all rows by chunkIds
+            // 2. Update metadata.isDisabled
+            // 3. Send an array of updates
+            // For brevity, let's do a fetch and per-row update:
+
+            // More correct approach:
+            const { data: rows } = await supabase
+                .from('documents5')
+                .select('id, metadata')
+                .in('doc_id', item.chunkIds);
+
+            if (!rows) throw new Error('No rows found for update');
+
+            for (const row of rows) {
+                const meta = row.metadata || {};
+                meta.isDisabled = !item.isDisabled;
+                const { error: updateErr } = await supabase
+                    .from('documents5')
+                    .update({ metadata: meta })
+                    .eq('doc_id', row.doc_id);
+                if (updateErr) throw updateErr;
+            }
+
+            setSuccess(`${item.isDisabled ? 'Enabled' : 'Disabled'} successfully`);
+            fetchData();
+        } catch (err: any) {
+            console.error('Error updating isDisabled:', err);
+            setError('Failed to update isDisabled state.');
+        }
+    };
+
+    const DepartmentModal = () => (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-2xl p-6 w-full max-w-sm">
+                <h2 className="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Add New Department</h2>
+                <input
+                    type="text"
+                    value={newDepartmentName}
+                    onChange={(e) => setNewDepartmentName(e.target.value)}
+                    placeholder="Department Name"
+                    className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded mb-4 bg-white dark:bg-zinc-900 text-gray-900 dark:text-white"
+                />
+                <div className="flex justify-end space-x-2">
+                    <button
+                        onClick={() => setShowAddDeptModal(false)}
+                        className="px-4 py-2 bg-gray-500 text-white rounded"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        onClick={addDepartment}
+                        className="px-4 py-2 bg-blue-500 text-white rounded"
+                    >
+                        Add
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 
     // Separate component to avoid hooks in .map()
     const ItemCard = ({item, onSelect}: {item: CombinedItem, onSelect: (i: CombinedItem) => void}) => {
@@ -292,58 +475,15 @@ const UploadPage = () => {
 
         const onEdit = (e: React.MouseEvent) => {
             e.stopPropagation();
-            setEditState({
-                editing: true,
-                department: editState.department,
-                access_level: editState.access_level,
-                workspace: editState.workspace
-            });
+            // If we consider enabling an edit mode for department/access_level/workspace, uncomment:
+            // setEditState({ ...editState, editing: true });
+            // For now, we focus on the disable/enable functionality as requested.
         };
 
-        const onCancel = (e: React.MouseEvent) => {
+        const onDisableEnable = async (e: React.MouseEvent) => {
             e.stopPropagation();
-            setEditState({
-                editing: false,
-                department: item.department,
-                access_level: item.access_level,
-                workspace: workspaceArrayToString(item.workspace)
-            });
+            await toggleDisable(item);
         };
-
-        const onSave = async (e: React.MouseEvent) => {
-            e.stopPropagation();
-            console.log(editState.department)
-            console.log(editState.access_level)
-            console.log(editState.workspace)
-
-            // try {
-            //     const { data, error } = await supabase
-            //         .from('documents3')
-            //         .update({
-            //             department: editState.department,
-            //             access_level: editState.access_level,
-            //             workspace: workspaceStringToArray(editState.workspace),
-            //         })
-            //         .eq('identifier_column', item.identifier);
-            //
-            //     if (error) {
-            //         throw error;
-            //     }
-            //
-            //     console.log('Update successful:', data);
-            //
-            //     // Update local state after successful save
-            //     item.department = editState.department;
-            //     item.access_level = editState.access_level;
-            //     item.workspace = workspaceStringToArray(editState.workspace);
-            //
-            //     setEditState({ ...editState, editing: false });
-            // } catch (err) {
-            //     console.error('Error updating data:', err);
-            //     alert('Failed to save changes.');
-            // }
-        };
-
 
         return (
             <div
@@ -363,75 +503,23 @@ const UploadPage = () => {
                     )}
                     {editState.editing ? (
                         <div className="space-y-2 mb-4">
-                            <div>
-                                <label className="block text-sm text-gray-700 dark:text-gray-300 mb-1">Department</label>
-                                <select
-                                    className="w-full p-1 border border-gray-300 dark:border-zinc-700 rounded"
-                                    value={editState.department}
-                                    onChange={(e) => setEditState({...editState, department: e.target.value})}
-                                >
-                                    {departmentsList.map(d => (
-                                        <option key={d} value={d}>{d}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm text-gray-700 dark:text-gray-300 mb-1">Access Level</label>
-                                <select
-                                    className="w-full p-1 border border-gray-300 dark:border-zinc-700 rounded"
-                                    value={editState.access_level}
-                                    onChange={(e) => setEditState({...editState, access_level: parseInt(e.target.value)})}
-                                >
-                                    {[1,2,3,4].map(l => (
-                                        <option key={l} value={l}>{l}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm text-gray-700 dark:text-gray-300 mb-1">Workspace</label>
-                                <input
-                                    type="text"
-                                    className="w-full p-1 border border-gray-300 dark:border-zinc-700 rounded"
-                                    value={editState.workspace}
-                                    onChange={(e) => setEditState({...editState, workspace: e.target.value})}
-                                />
-                                <p className="text-xs text-gray-500 mt-1">Comma separated values</p>
-                            </div>
-                            <div className="flex space-x-2 mt-2">
-                                <button
-                                    onClick={onSave}
-                                    className="px-2 py-1 bg-blue-500 text-white rounded"
-                                >
-                                    Save
-                                </button>
-                                <button
-                                    onClick={onCancel}
-                                    className="px-2 py-1 bg-gray-500 text-white rounded"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
+                            {/* Edit form if needed */}
                         </div>
                     ) : (
                         <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1 mb-4">
                             <p><strong>Department:</strong> {item.department}</p>
                             <p><strong>Access Level:</strong> {item.access_level}</p>
                             <p><strong>Workspace:</strong> {item.workspace.join(', ')}</p>
+                            <p><strong>Disabled:</strong> {item.isDisabled ? 'Yes' : 'No'}</p>
                         </div>
                     )}
                     {!editState.editing && (
                         <div className="flex justify-end space-x-2">
                             <button
-                                onClick={onEdit}
-                                className="p-1 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/50 rounded transition-colors duration-200"
+                                onClick={onDisableEnable}
+                                className={`p-1 ${item.isDisabled ? 'text-green-600 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/50' : 'text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/50'} rounded transition-colors duration-200`}
                             >
-                                Edit
-                            </button>
-                            <button
-                                onClick={onEdit}
-                                className="p-1 text-red-600 dark:text-red-400 hover:bg-blue-50 dark:hover:bg-red-900/50 rounded transition-colors duration-200"
-                            >
-                                Delete
+                                {item.isDisabled ? 'Enable' : 'Disable'}
                             </button>
                             {(item.type === 'file' && item.s3_url) && (
                                 <a
@@ -455,7 +543,7 @@ const UploadPage = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {items.length === 0 && (
                 <div className="col-span-full text-center py-8 text-gray-500 dark:text-gray-400">
-                No items found
+                    No items found
                 </div>
             )}
             {items.map((item, index) => (
@@ -463,6 +551,10 @@ const UploadPage = () => {
             ))}
         </div>
     );
+
+    const toggleDomainCollapse = (domain: string) => {
+        setCollapsedDomains(prev => ({...prev, [domain]: !prev[domain]}));
+    };
 
     const renderUrlsByDomain = (urls: CombinedItem[]) => {
         const groupedByDomain = urls.reduce((acc, item) => {
@@ -474,20 +566,32 @@ const UploadPage = () => {
 
         return (
             <div className="space-y-4">
-                {Object.entries(groupedByDomain).map(([domain, items]) => (
-                    <div key={domain}>
-                        <h3 className="text-lg font-semibold mb-2">{domain}</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                            {items.map((item, index) => (
-                                <ItemCard key={index} item={item} onSelect={(i) => setSelectedItem(i)} />
-                            ))}
+                {Object.entries(groupedByDomain).map(([domain, items]) => {
+                    const isCollapsed = collapsedDomains[domain] ?? false;
+                    return (
+                        <div key={domain} className="border border-gray-200 dark:border-zinc-700 rounded-lg">
+                            <div
+                                className="flex items-center justify-between p-4 bg-gray-100 dark:bg-zinc-900 cursor-pointer"
+                                onClick={() => toggleDomainCollapse(domain)}
+                            >
+                                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{domain}</h3>
+                                {isCollapsed ? <FiChevronDown /> : <FiChevronUp />}
+                            </div>
+                            {!isCollapsed && (
+                                <div className="p-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                        {items.map((item, index) => (
+                                            <ItemCard key={index} item={item} onSelect={(i) => setSelectedItem(i)} />
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
         );
     };
-
 
     const renderContent = () => {
         switch (activeTab) {
@@ -545,17 +649,39 @@ const UploadPage = () => {
                         {item.update_timestamp && (
                             <p className="mb-2"><strong>Updated:</strong> {new Date(item.update_timestamp).toLocaleString()}</p>
                         )}
+                        <p className="mb-2"><strong>Disabled:</strong> {item.isDisabled ? 'Yes' : 'No'}</p>
                     </div>
                 </div>
             </div>
         );
     };
 
-
     return (
         <div className="p-6">
             <div className="bg-white dark:bg-zinc-800 rounded-xl shadow-xl p-6">
-                <h1 className="text-3xl font-bold mb-8 text-gray-900 dark:text-white">Upload Content</h1>
+                <div className="flex items-center justify-between">
+                    <h1 className="text-3xl font-bold mb-2 text-gray-900 dark:text-white">Upload Content</h1>
+                    <button
+                        onClick={() => setShowAddDeptModal(true)}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                    >
+                        Add Department
+                    </button>
+                </div>
+                {departments.length > 0 && (
+                    <div className="mb-4 flex items-center space-x-2">
+                        <label className="text-gray-700 dark:text-gray-300">Department:</label>
+                        <select
+                            value={selectedDepartment}
+                            onChange={(e) => setSelectedDepartment(e.target.value)}
+                            className="p-1 border border-gray-300 dark:border-zinc-700 rounded bg-white dark:bg-zinc-900 text-gray-700 dark:text-white"
+                        >
+                            {departments.map(d => (
+                                <option key={d.id} value={d.name}>{d.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
 
                 {/* Tabs */}
                 <div className="flex space-x-4 mb-6 border-b border-gray-200 dark:border-zinc-700">
@@ -705,14 +831,14 @@ const UploadPage = () => {
                             value={textTitle}
                             onChange={(e) => setTextTitle(e.target.value)}
                             placeholder="Enter title"
-                            className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900"
+                            className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900 text-gray-700 dark:text-white"
                         />
-                        <textarea
+                        <ReactQuill
+                            theme="snow"
                             value={textContent}
-                            onChange={(e) => setTextContent(e.target.value)}
-                            placeholder="Enter your text content"
-                            rows={10}
-                            className="w-full p-2 border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-900"
+                            onChange={setTextContent}
+                            className="bg-white dark:bg-zinc-900 text-gray-700 dark:text-white pb-10"
+                            style={{height: '250px'}}
                         />
                         <button
                             type="submit"
@@ -745,6 +871,7 @@ const UploadPage = () => {
                     />
                 )}
             </div>
+            {showAddDeptModal && <DepartmentModal />}
         </div>
     );
 };
